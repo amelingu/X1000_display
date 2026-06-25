@@ -70,6 +70,14 @@ X1000_display/
 │   └── Xcode.txt                 Xcode project setup notes
 ├── docs/
 │   └── bezel SHB1000S.txt        SHB1000S hardware reference notes
+├── SDK/                          ← download and place here (not in repo)
+│   ├── CHeaders/
+│   │   ├── XPLM/                 Core SDK headers
+│   │   └── Widgets/              Widget SDK headers
+│   └── Libraries/
+│       ├── Lin/                  Linux .so stubs
+│       ├── Win/                  Windows .lib stubs
+│       └── Mac/                  macOS .framework stubs
 ├── compile.sh                    Linux build + install
 ├── compile_win.sh                Windows cross-compile (MinGW-w64) + install
 ├── compile_mac.sh                macOS build (run on Mac) + install
@@ -79,7 +87,7 @@ X1000_display/
 └── .gitignore
 ```
 
-> **Not included:** `SDK/` — download from [developer.x-plane.com](https://developer.x-plane.com) and place at `SDK/`.
+> **`SDK/` is not included in the repository** — download it from [developer.x-plane.com](https://developer.x-plane.com) (free registration required) and place it at `SDK/` as shown above before building.
 
 ---
 
