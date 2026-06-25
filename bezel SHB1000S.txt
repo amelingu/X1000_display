@@ -1,0 +1,34 @@
+Microchip 1:
+"bluegiga
+Model: BLE113-A-M256K
+KCC-CRM-BGT-BLE113
+FCCID:QOQBLE113
+IC:5123A-BLE13
+Anotel:
+4359-14-3402
+R 007-AB0103"
+
+Associated external connector:
+P2.2
+P2.1
+RST
+3.3V
+GND
+
+Microchip 2:
+"49AJQJTG4
+M430F5438
+REV N"
+
+Associated external connector:
+BSL-TX
+BSL-RX
+RST
+GND
+TEST
+VCC
+TCK
+TMS
+TDI
+TDO
+16 pins in total, not all have indications

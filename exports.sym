@@ -1,0 +1,15 @@
+# exports.sym — Linker version script for X1000_display.xpl
+# Only the four XPlugin* entry points need to be visible to X-Plane.
+# Everything else (std::, GL, our own classes) stays hidden,
+# preventing symbol clashes with other plugins.
+
+{
+    global:
+        XPluginStart;
+        XPluginStop;
+        XPluginEnable;
+        XPluginDisable;
+        XPluginReceiveMessage;
+    local:
+        *;
+};

@@ -1,0 +1,20 @@
+# Compiled binaries
+build/
+
+# X-Plane SDK — download from developer.x-plane.com
+SDK/
+
+# User settings (contains local IP, window position)
+*.ini
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Editor/OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

@@ -1,0 +1,151 @@
+// RelayManager.cpp — Spawn, monitor, and log the Python relay process
+// Uses Platform:: for cross-platform process management
+
+#include "RelayManager.h"
+#include "Platform.h"
+#include <XPLMUtilities.h>
+#if defined(LIN) || defined(__APPLE__)
+#  include <unistd.h>   // access(), F_OK
+#elif defined(_WIN32)
+#  include <io.h>       // _access()
+#endif
+#include <cstdio>
+#include <cstring>
+
+RelayManager::RelayManager()
+    : m_pfd_port(9000), m_mfd_port(9001)
+    , m_monitor_running(false)
+{}
+
+RelayManager::~RelayManager() { stop(); }
+
+void RelayManager::init(const std::string& path,
+                        uint16_t pfd_port, uint16_t mfd_port) {
+    m_script_path = path;
+    m_pfd_port    = pfd_port;
+    m_mfd_port    = mfd_port;
+}
+
+bool RelayManager::start() {
+    if (isRunning()) return true;
+
+    // Check script exists
+#if defined(_WIN32)
+    if (_access(m_script_path.c_str(), 0) != 0) {
+#else
+    if (access(m_script_path.c_str(), F_OK) != 0) {
+#endif
+        std::string msg = "[X1000] Relay: script not found: " + m_script_path + "\n";
+        XPLMDebugString(msg.c_str());
+        addLog("Script not found: " + m_script_path, true);
+        return false;
+    }
+
+    char pfd_str[8], mfd_str[8];
+    snprintf(pfd_str, sizeof(pfd_str), "%u", m_pfd_port);
+    snprintf(mfd_str, sizeof(mfd_str), "%u", m_mfd_port);
+
+    std::vector<std::string> args = {
+        Platform::pythonExecutable(),
+        m_script_path,
+        "--pfd-port", pfd_str,
+        "--mfd-port", mfd_str
+    };
+
+    m_handle = Platform::spawnProcess(args);
+    if (!m_handle.isValid()) {
+        XPLMDebugString("[X1000] Relay: process launch failed\n");
+        addLog("Process launch failed", true);
+        return false;
+    }
+
+    char buf[80];
+    snprintf(buf, sizeof(buf), "[X1000] Relay started\n");
+    XPLMDebugString(buf);
+    addLog("Relay started", false);
+
+    m_monitor_running = true;
+    m_monitor = std::thread(&RelayManager::monitorThread, this);
+    return true;
+}
+
+void RelayManager::stop() {
+    // Set flag BEFORE killing so monitor thread knows this is intentional
+    m_monitor_running = false;
+    if (m_handle.isValid()) {
+        Platform::killProcess(m_handle);
+        addLog("Relay stopped.", false);
+        XPLMDebugString("[X1000] Relay stopped.\n");
+    }
+    if (m_monitor.joinable()) m_monitor.join();
+}
+
+bool RelayManager::isRunning() const {
+    return m_handle.isValid() && Platform::isProcessAlive(m_handle);
+}
+
+void RelayManager::restart(uint16_t pfd_port, uint16_t mfd_port) {
+    stop();
+    m_pfd_port = pfd_port;
+    m_mfd_port = mfd_port;
+    start();
+}
+
+void RelayManager::monitorThread() {
+    std::string partial;
+
+    while (m_monitor_running) {
+        std::string chunk = Platform::readProcessOutput(m_handle, 200);
+
+        if (chunk.empty()) {
+            if (m_handle.isValid() && !Platform::isProcessAlive(m_handle)) {
+                // Only report as unexpected if we didn't initiate the stop
+                if (m_monitor_running) {
+                    addLog("Relay process exited unexpectedly.", true);
+                    XPLMDebugString("[X1000] Relay process exited unexpectedly.\n");
+                }
+                break;
+            }
+            continue;
+        }
+
+        partial += chunk;
+        size_t pos;
+        while ((pos = partial.find('\n')) != std::string::npos) {
+            std::string line = partial.substr(0, pos);
+            partial = partial.substr(pos + 1);
+            if (line.empty()) continue;
+
+            bool is_err = line.find("ERROR")     != std::string::npos
+                       || line.find("Error")     != std::string::npos
+                       || line.find("Traceback") != std::string::npos
+                       || line.find("Exception") != std::string::npos;
+
+            addLog(line, is_err);
+
+            if (is_err
+             || line.find("first frame") != std::string::npos
+             || line.find("listening")   != std::string::npos) {
+                std::string xplog = "[X1000] Relay: " + line + "\n";
+                XPLMDebugString(xplog.c_str());
+            }
+        }
+    }
+}
+
+void RelayManager::addLog(const std::string& text, bool is_error) {
+    std::lock_guard<std::mutex> lock(m_log_mutex);
+    if (m_log.size() >= MAX_LOG_LINES)
+        m_log.erase(m_log.begin());
+    m_log.push_back({text, is_error});
+}
+
+std::vector<RelayLogEntry> RelayManager::getLog() {
+    std::lock_guard<std::mutex> lock(m_log_mutex);
+    return m_log;
+}
+
+void RelayManager::clearLog() {
+    std::lock_guard<std::mutex> lock(m_log_mutex);
+    m_log.clear();
+}
