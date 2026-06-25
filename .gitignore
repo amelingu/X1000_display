@@ -12,6 +12,9 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Private notes
+handover_*.md
+
 # Editor/OS
 .vscode/
 .idea/
