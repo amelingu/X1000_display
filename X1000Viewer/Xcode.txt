@@ -1,0 +1,42 @@
+iOS app setup (one-time, ~10 minutes)
+You need Xcode on a Mac (free). If you don't have a Mac, let me know and we'll find an alternative.
+
+Xcode → File → New → Project → iOS → App
+Name: X1000Viewer, Interface: SwiftUI, Language: Swift
+Replace the entire ContentView.swift with the contents of X1000Viewer.swift
+Connect iPad via USB → select it as the run target
+Press Run (▶)
+On iPad: Settings → General → VPN & Device Management → trust your Apple ID
+App launches full-screen, shows "Waiting for X1000 stream…"
+
+Do the same for the second iPad — same app, same port 9000, it just receives from whichever PC IP is sending to it.
+Do you have a Mac with Xcode available?
+
+
+-----------------------------------------
+
+
+What to install on the Mac:
+
+Xcode (free, from the App Store) — needs macOS 13 Ventura minimum
+No other dependencies
+
+What to bring:
+
+The X1000Viewer.swift file from the earlier zip
+Both iPads connected via USB
+Your Apple ID (free account works, no developer program needed)
+
+Xcode setup steps (10 minutes):
+
+File → New → Project → iOS → App
+Product Name: X1000Viewer, Interface: SwiftUI, Language: Swift
+Replace ContentView.swift entirely with X1000Viewer.swift contents
+Select first iPad as run target → press Run (▶)
+On iPad: Settings → General → VPN & Device Management → trust your Apple ID
+Repeat for second iPad — same app, just select the other iPad as target
+
+One thing to check before the Mac session:
+
+The app listens on port 9000. Make sure the iPads' firewall isn't blocking incoming UDP. On iOS there's no firewall to configure — it just works. But confirm the iPads are on the same subnet as the PC (192.168.1.x).
+What macOS version is the old Mac running? That determines whether Xcode 15 will install.
