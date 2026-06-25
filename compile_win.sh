@@ -104,13 +104,13 @@ make_import_lib() {
         echo "  → $mingw_lib ($(du -h "$mingw_lib" | cut -f1))"
         # Verify __imp_ symbols were generated
         local imp_count
-        imp_count=$("$NM" "$mingw_lib" 2>/dev/null | grep -c "__imp_" || echo 0)
+        imp_count=$("$NM" "$mingw_lib" 2>/dev/null | grep -c "__imp_" || echo "0")
         echo "    __imp_ symbols: $imp_count"
         if [ "$imp_count" -eq 0 ]; then
             echo "  WARNING: No __imp_ symbols — trying without --leading-underscore..."
             "$DLLTOOL" --def "$deffile" --dllname "${name}.dll" \
                 --output-lib "$mingw_lib" --add-underscore
-            imp_count=$("$NM" "$mingw_lib" 2>/dev/null | grep -c "__imp_" || echo 0)
+            imp_count=$("$NM" "$mingw_lib" 2>/dev/null | grep -c "__imp_" || echo "0")
             echo "    __imp_ symbols after retry: $imp_count"
         fi
     else
@@ -239,10 +239,7 @@ if [ "${BUILD_STATUS:-0}" -ne 0 ]; then
     exit 1
 fi
 
-WARN_COUNT=$(grep -c "warning:" "$WARN_LOG" 2>/dev/null || echo 0)
-echo ""
-echo "✓ Build succeeded: $BUILD_DIR/X1000_display.xpl"
-[ "$WARN_COUNT" -gt 0 ] && echo "  Warnings: $WARN_COUNT (see $WARN_LOG)"
+if grep -q "warning:" "$WARN_LOG" 2>/dev/null; then echo "  Warnings logged — see $WARN_LOG"; fi
 
 # ---- Install ----------------------------------------------------------------
 if [[ "${1:-}" == "install" ]]; then
