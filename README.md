@@ -33,8 +33,9 @@ X-Plane G1000 draw callback
   → tools/x1000_relay.py (WebSocket server)   ← managed by plugin
   → Safari on iPad  OR  X1000Viewer iOS app
 
-tools/x1000_bezel.py (standalone Python script, pyserial)   ← TODO
-  → reads CP2102 USB-UART serial port
+tools/x1000_bezel.py (standalone Python script, bleak BLE)
+  → connects to SHB1000S bezel(s) via Bluetooth LE
+  → receives UKP byte notifications from characteristic
   → sends UKP packets → Plugin UDP :15683
   → ConnectionManager → XPLMCommandOnce (g1000n1_* / g1000n2_*)
 
@@ -103,7 +104,7 @@ X1000_display/
 | Windows build | ✅ Compiles (untested at runtime) |
 | macOS build | ⏳ Script ready, needs a Mac |
 | Bezel UKP command map | ✅ Complete (PFD + MFD) |
-| Bezel serial input (x1000_bezel.py) | 🔧 TODO — awaiting CP2102 adapters |
+| Bezel BLE input (x1000_bezel.py) | ✅ Working — awaiting BLE dongle for sim PC |
 | Backlight LED output | ✅ Protocol complete, pending verification |
 | X1000Viewer iOS app | 🔧 In progress |
 
@@ -126,7 +127,7 @@ X1000_display/
 
 - X-Plane 12 (SDK 4.1+)
 - X-Plane SDK — download from [developer.x-plane.com](https://developer.x-plane.com), place at `SDK/`
-- Python 3.8+ (relay script — no pip installs needed)
+- Python 3.8+ with `bleak` (`pip install bleak --break-system-packages`)
 - Two iPads with Safari (or X1000Viewer)
 
 ### Build requirements
@@ -187,16 +188,33 @@ For a better experience (hidden status bar, true full screen, screen always on) 
 
 ---
 
-## Bezel Input (TODO)
+## Bezel Input
 
-The UKP command map is fully implemented inside the plugin (`UKPHandler.cpp`) for both PFD (`g1000n1_*`) and MFD (`g1000n2_*`) commands. What remains is `tools/x1000_bezel.py` — a standalone Python script that will:
+The SHB1000S bezel communicates over **Bluetooth LE** — button and knob events are sent as single-byte UKP notifications on a vendor-specific GATT characteristic. No serial interface is required.
 
-1. Open the CP2102 USB-UART serial port
-2. Read the MSP430 BSL-TX output from the SHB1000S PCB
-3. Parse button/knob events
-4. Send `ServerAv|UKP=N` UDP packets to the plugin on port 15683
+**BLE details:**
+- Service UUID: `c8ad063d-cc77-4d98-997f-dc796450b209`
+- Characteristic UUID: `f62a9f56-f29e-48a8-a317-47ee37a58999`
+- Each notification = one or more UKP bytes
+- Even byte = button press or knob CW turn
+- Odd byte = button release or knob CCW turn
 
-This script is kept separate from the plugin for crash isolation. Work will begin once CP2102 USB-UART adapters arrive and the serial protocol is confirmed.
+**`tools/x1000_bezel.py`** connects to the bezel(s) via BLE, subscribes to notifications, and forwards each UKP value as `ServerAv|UKP=N` UDP packets to the plugin on port 15683. The plugin's existing `ConnectionManager` and `UKPHandler` dispatch them to X-Plane commands with no C++ changes needed.
+
+```bash
+pip install bleak --break-system-packages
+
+# Auto-scan and connect
+python3 tools/x1000_bezel.py
+
+# Explicit MAC addresses
+python3 tools/x1000_bezel.py --pfd 00:07:80:A6:F5:0A --plugin-ip 127.0.0.1
+
+# Two bezels
+python3 tools/x1000_bezel.py --pfd XX:XX:XX:XX:XX:XX --mfd YY:YY:YY:YY:YY:YY
+```
+
+The script is kept as a separate process from the plugin for crash isolation. A USB Bluetooth 5.0 dongle is required on the sim PC (any CSR or Realtek based dongle works on Ubuntu — e.g. TP-Link UB500).
 
 ---
 
