@@ -98,7 +98,6 @@ g++ "${CXXFLAGS[@]}" "${LDFLAGS[@]}" \
     2> >(grep -v "^$" | tee "$WARN_LOG" | grep -E "error:|warning:.*DisplayStreamer|warning:.*Plugin|warning:.*Connection|warning:.*UKP|warning:.*Backlight" >&2 || true)
 
 if grep -q "warning:" "$WARN_LOG" 2>/dev/null; then echo "  Warnings logged — see $WARN_LOG"; fi
-fi
 
 echo ""
 echo "✓ Build succeeded: $BUILD_DIR/X1000_display.xpl"

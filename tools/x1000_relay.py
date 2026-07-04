@@ -270,7 +270,8 @@ class Relay:
 
     async def run(self):
         server = await asyncio.start_server(
-            self.handle_connection, '0.0.0.0', self.ws_port)
+            self.handle_connection, '0.0.0.0', self.ws_port,
+            reuse_port=True)
         log.info(f'{self.name}: HTTP/WS on :{self.ws_port} '
                  f'-> open http://<PC_IP>:{self.ws_port}/ on iPad')
         async with server:

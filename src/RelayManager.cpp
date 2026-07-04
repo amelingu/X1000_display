@@ -32,6 +32,16 @@ void RelayManager::init(const std::string& path,
 bool RelayManager::start() {
     if (isRunning()) return true;
 
+    // Kill any orphaned instance of the same script before starting
+    // (handles case where X-Plane crashed and left the process running)
+    std::string script_name = m_script_path;
+    auto slash = script_name.rfind('/');
+    if (slash != std::string::npos) script_name = script_name.substr(slash + 1);
+    if (!script_name.empty()) {
+        std::string kill_cmd = "pkill -f "" + script_name + "" 2>/dev/null; sleep 0.5";
+        system(kill_cmd.c_str());
+    }
+
     // Check script exists
 #if defined(_WIN32)
     if (_access(m_script_path.c_str(), 0) != 0) {

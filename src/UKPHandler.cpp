@@ -147,26 +147,51 @@ static std::unordered_map<uint32_t, CmdPair> buildMap() {
     m[37]  = { "sim/GPS/g1000n1_cvol_dn",          "" };
 
     // -----------------------------------------------------------------------
-    // AUDIO PANEL (physically on PFD bezel, UKPs arrive from PFD iPad)
+    // AUDIO PANEL (physically attached to PFD bezel)
+    // UKP values confirmed by BLE capture session 2026-07-04.
     //
-    // The Simionic handover listed these as "no command found".
-    // X-Plane 12 exposes audio panel via sim/cockpit2/radios/actuators/
-    // and sim/audio_panel/* — most are DATAREFS not commands, so the
-    // BacklightManager / a dedicated AudioPanelHandler should write them.
+    // Note: X-Plane 12 G1000 audio panel buttons are exposed as commands
+    // under sim/GPS/g1000n1_*. Volume knobs are dataref-only in default C172.
     //
-    // The two volume knobs do have commands in some aircraft:
-    //   sim/audio_panel/select_pilot       (pilot audio selector)
-    //   sim/audio_panel/monitor_volume_up/dn  (not standard in XP12 default)
-    //
-    // For now we log these UKPs at INFO level.  The BacklightManager will
-    // track COM/NAV active states independently via datarefs.
-    //
-    // AUDIO VOL outer CW/CCW
-    m[148] = { "TODO:audio_vol_outer_up",   "" };
-    m[149] = { "TODO:audio_vol_outer_dn",   "" };
-    // AUDIO VOL inner CW/CCW
-    m[146] = { "TODO:audio_vol_inner_up",   "" };
-    m[147] = { "TODO:audio_vol_inner_dn",   "" };
+    // MIC select buttons
+    m[42]  = { "sim/GPS/g1000n1_com1_mic",        "" };  // COM1/MIC
+    m[44]  = { "sim/GPS/g1000n1_com2_mic",        "" };  // COM2/MIC
+    m[46]  = { "sim/GPS/g1000n1_com3_mic",        "" };  // COM3/MIC (if fitted)
+    // COM monitor buttons
+    m[50]  = { "sim/GPS/g1000n1_com1",            "" };  // COM1 monitor
+    m[52]  = { "sim/GPS/g1000n1_com2",            "" };  // COM2 monitor
+    m[54]  = { "sim/GPS/g1000n1_com3",            "" };  // COM3 monitor (if fitted)
+    // COM1/2 toggle
+    m[48]  = { "sim/GPS/g1000n1_com12",           "" };  // COM1/2
+    // NAV monitor buttons
+    m[130] = { "sim/GPS/g1000n1_nav1",            "" };  // NAV1
+    m[132] = { "sim/GPS/g1000n1_nav2",            "" };  // NAV2
+    m[126] = { "sim/GPS/g1000n1_adf",             "" };  // ADF
+    m[124] = { "sim/GPS/g1000n1_dme",             "" };  // DME
+    m[128] = { "sim/GPS/g1000n1_aux",             "" };  // AUX
+    // Speaker / headphone
+    m[118] = { "sim/GPS/g1000n1_spkr",            "" };  // SPKR
+    // Marker beacon
+    m[120] = { "sim/GPS/g1000n1_mkr_mute",        "" };  // MKR/MUTE
+    m[122] = { "sim/GPS/g1000n1_hi_sens",         "" };  // HI SENS
+    // Special buttons
+    m[114] = { "sim/GPS/g1000n1_tel",             "" };  // TEL
+    m[116] = { "sim/GPS/g1000n1_pa",              "" };  // PA
+    m[134] = { "sim/GPS/g1000n1_man_sq",          "" };  // MAN SQ
+    m[136] = { "sim/GPS/g1000n1_play",            "" };  // PLAY
+    // Pilot/Copilot select
+    m[138] = { "sim/GPS/g1000n1_pilot",           "" };  // PILOT
+    m[140] = { "sim/GPS/g1000n1_coplt",           "" };  // COPILOT
+    // Display backup
+    m[142] = { "sim/GPS/g1000n1_display_backup",  "" };  // DISPLAY BACKUP
+    // Pilot volume knob — press
+    m[144] = { "sim/GPS/g1000n1_pilot_knob",      "" };  // PILOT KNOB PRESS
+    // Pilot inner volume knob CW/CCW
+    m[146] = { "sim/GPS/g1000n1_pilot_vol_up",    "" };  // PILOT INNER CW
+    m[147] = { "sim/GPS/g1000n1_pilot_vol_dn",    "" };  // PILOT INNER CCW
+    // Passenger outer volume knob CW/CCW
+    m[148] = { "sim/GPS/g1000n1_pass_vol_up",     "" };  // PASS OUTER CW
+    m[149] = { "sim/GPS/g1000n1_pass_vol_dn",     "" };  // PASS OUTER CCW
     // -----------------------------------------------------------------------
 
     return m;
@@ -210,15 +235,7 @@ void UKPHandler::handle(uint32_t ukp, BezelSide side) {
         return;
     }
 
-    // Skip TODO placeholders (audio panel, unresolved)
-    if (cmd_str.rfind("TODO:", 0) == 0) {
-        char buf[96];
-        snprintf(buf, sizeof(buf),
-                 "[X1000] UKP %u — audio panel (%s) not yet mapped\n",
-                 ukp, cmd_str.c_str());
-        XPLMDebugString(buf);
-        return;
-    }
+
 
     fireCommand(cmd_str.c_str());
 }
