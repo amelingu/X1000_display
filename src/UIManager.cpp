@@ -30,6 +30,8 @@ enum class ClickAction {
     FIELD_FPS,
     FIELD_PC_IP,
     CHECKBOX_AUTOSTART,
+    FIELD_PFD_MAC,
+    FIELD_MFD_MAC,
 };
 
 struct HitRect {
@@ -57,10 +59,12 @@ UIManager::~UIManager() {
 
 void UIManager::init(SettingsManager* settings,
                      RelayManager*    relay,
+                     RelayManager*    bezel_relay,
                      ApplyCallback    on_apply) {
-    m_settings = settings;
-    m_relay    = relay;
-    m_on_apply = on_apply;
+    m_settings     = settings;
+    m_relay        = relay;
+    m_bezel_relay  = bezel_relay;
+    m_on_apply     = on_apply;
 
     const Settings& s = settings->get();
     snprintf(m_buf_pfd_port, sizeof(m_buf_pfd_port), "%u",   s.relay_pfd_port);
@@ -69,6 +73,8 @@ void UIManager::init(SettingsManager* settings,
     snprintf(m_buf_quality,  sizeof(m_buf_quality),  "%d",   s.jpeg_quality);
     snprintf(m_buf_fps,      sizeof(m_buf_fps),      "%.0f", s.fps);
     snprintf(m_buf_pc_ip,    sizeof(m_buf_pc_ip),    "%s",   s.pc_ip.c_str());
+    snprintf(m_buf_pfd_mac,  sizeof(m_buf_pfd_mac),  "%s",   s.pfd_bezel_mac.c_str());
+    snprintf(m_buf_mfd_mac,  sizeof(m_buf_mfd_mac),  "%s",   s.mfd_bezel_mac.c_str());
 
     int screen_w, screen_h;
     XPLMGetScreenSize(&screen_w, &screen_h);
@@ -139,8 +145,9 @@ void UIManager::keyboardCB(XPLMWindowID, char key, XPLMKeyFlags,
     if (ui->m_active_field < 0) return;
     char* bufs[] = { ui->m_buf_pfd_port, ui->m_buf_mfd_port,
                      ui->m_buf_width,    ui->m_buf_quality,
-                     ui->m_buf_fps,      ui->m_buf_pc_ip };
-    int   szs[]  = { 8, 8, 8, 8, 8, 32 };
+                     ui->m_buf_fps,      ui->m_buf_pc_ip,
+                     ui->m_buf_pfd_mac,  ui->m_buf_mfd_mac };
+    int   szs[]  = { 8, 8, 8, 8, 8, 32, 20, 20 };
     char* buf = bufs[ui->m_active_field];
     int   sz  = szs[ui->m_active_field];
     if (key == 8 || key == 127) {
@@ -269,6 +276,12 @@ void UIManager::drawStatus(int& y, int left, int right) {
     drawText(x, y, rbuf, relay_ok ? 0.2f : 1.0f, relay_ok ? 1.0f : 0.3f, 0.2f);
     y -= 16;
 
+    bool bezel_ok = m_bezel_relay && m_bezel_relay->isRunning();
+    char bbuf[48];
+    snprintf(bbuf, sizeof(bbuf), "Bezel:   %s", bezel_ok ? "connected" : "stopped");
+    drawText(x, y, bbuf, bezel_ok ? 0.2f : 0.8f, bezel_ok ? 1.0f : 0.8f, 0.2f);
+    y -= 16;
+
     char pbuf[72];
     snprintf(pbuf, sizeof(pbuf), "PFD:     %s   %d fps   %d KB/frame",
              m_pfd_streaming ? "streaming" : "idle", m_pfd_fps, m_pfd_kb);
@@ -330,6 +343,16 @@ void UIManager::drawNetwork(int& y, int left, int right) {
     drawText(x, y+2, "FPS:");
     drawTextInput(x+72, y, 55, m_buf_fps, sizeof(m_buf_fps),
                   m_active_field == 4, ClickAction::FIELD_FPS);
+    y -= 24;
+
+    // Bezel MAC addresses
+    drawText(x, y+2, "PFD bezel:");
+    drawTextInput(x+80, y, 130, m_buf_pfd_mac, sizeof(m_buf_pfd_mac),
+                  m_active_field == 6, ClickAction::FIELD_PFD_MAC);
+    y -= 24;
+    drawText(x, y+2, "MFD bezel:");
+    drawTextInput(x+80, y, 130, m_buf_mfd_mac, sizeof(m_buf_mfd_mac),
+                  m_active_field == 7, ClickAction::FIELD_MFD_MAC);
     y -= 24;
 
     // Autostart checkbox
@@ -455,6 +478,8 @@ void UIManager::handleClick(int mx, int my) {
             s.jpeg_quality   = atoi(m_buf_quality);
             s.fps            = atof(m_buf_fps);
             s.pc_ip          = m_buf_pc_ip;
+            s.pfd_bezel_mac  = m_buf_pfd_mac;
+            s.mfd_bezel_mac  = m_buf_mfd_mac;
             m_settings->save();
             if (m_on_apply) m_on_apply();
             m_active_field = -1;
@@ -467,6 +492,8 @@ void UIManager::handleClick(int mx, int my) {
         case ClickAction::FIELD_QUALITY:  m_active_field = 3; XPLMTakeKeyboardFocus(m_window); break;
         case ClickAction::FIELD_FPS:      m_active_field = 4; XPLMTakeKeyboardFocus(m_window); break;
         case ClickAction::FIELD_PC_IP:    m_active_field = 5; XPLMTakeKeyboardFocus(m_window); break;
+        case ClickAction::FIELD_PFD_MAC:  m_active_field = 6; XPLMTakeKeyboardFocus(m_window); break;
+        case ClickAction::FIELD_MFD_MAC:  m_active_field = 7; XPLMTakeKeyboardFocus(m_window); break;
 
         case ClickAction::CHECKBOX_AUTOSTART:
             m_settings->get().autostart = !m_settings->get().autostart;

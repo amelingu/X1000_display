@@ -21,7 +21,8 @@ public:
     ~RelayManager();
 
     void init(const std::string& relay_script_path,
-              uint16_t pfd_port, uint16_t mfd_port);
+              uint16_t pfd_port, uint16_t mfd_port,
+              const std::string& extra_args = "");
 
     bool start();
     void stop();
@@ -37,6 +38,7 @@ private:
     void addLog(const std::string& text, bool is_error);
 
     std::string              m_script_path;
+    std::string              m_extra_args;
     uint16_t                 m_pfd_port;
     uint16_t                 m_mfd_port;
     Platform::ProcessHandle  m_handle;

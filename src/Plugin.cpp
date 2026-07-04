@@ -13,11 +13,12 @@
 #include <cstring>
 #include <string>
 
-static ConnectionManager* g_conn     = nullptr;
-static DisplayStreamer*   g_display  = nullptr;
-static SettingsManager*   g_settings = nullptr;
-static RelayManager*      g_relay    = nullptr;
-static UIManager*         g_ui       = nullptr;
+static ConnectionManager* g_conn        = nullptr;
+static DisplayStreamer*   g_display     = nullptr;
+static SettingsManager*   g_settings    = nullptr;
+static RelayManager*      g_relay       = nullptr;   // display relay
+static RelayManager*      g_bezel_relay = nullptr;   // bezel BLE bridge
+static UIManager*         g_ui          = nullptr;
 
 static std::string g_plugin_dir;
 
@@ -193,9 +194,34 @@ PLUGIN_API int XPluginEnable() {
                   g_settings->get().relay_mfd_port);
     g_relay->start();
 
+    // Bezel BLE bridge
+    g_bezel_relay = new RelayManager();
+    {
+        std::string bezel_path = g_plugin_dir + "/../tools/x1000_bezel.py";
+        const Settings& bs = g_settings->get();
+        std::string bezel_args;
+        if (!bs.pfd_bezel_mac.empty())
+            bezel_args += "--pfd " + bs.pfd_bezel_mac + " ";
+        if (!bs.mfd_bezel_mac.empty())
+            bezel_args += "--mfd " + bs.mfd_bezel_mac + " ";
+        bezel_args += "--plugin-ip 127.0.0.1";
+
+        g_bezel_relay->init(bezel_path,
+                            bs.bezel_pfd_port,
+                            bs.bezel_mfd_port,
+                            bezel_args);
+
+        if (!bs.pfd_bezel_mac.empty() || !bs.mfd_bezel_mac.empty()) {
+            XPLMDebugString("[X1000] Bezel: starting BLE bridge...\n");
+            g_bezel_relay->start();
+        } else {
+            XPLMDebugString("[X1000] Bezel: no MAC configured in ini\n");
+        }
+    }
+
     // UI — window visibility driven purely by saved setting, no extra save here
     g_ui = new UIManager();
-    g_ui->init(g_settings, g_relay, applySettings);
+    g_ui->init(g_settings, g_relay, g_bezel_relay, applySettings);
     // Only show if explicitly saved as visible (default is false)
     if (g_settings->get().window_visible) {
         g_ui->show();
@@ -217,8 +243,9 @@ PLUGIN_API void XPluginDisable() {
     XPLMDebugString("[X1000] XPluginDisable\n");
     XPLMUnregisterFlightLoopCallback(flightLoopCB, nullptr);
 
-    if (g_ui)      { delete g_ui;      g_ui      = nullptr; }
-    if (g_relay)   { g_relay->stop();  delete g_relay;  g_relay   = nullptr; }
+    if (g_ui)          { delete g_ui;             g_ui          = nullptr; }
+    if (g_bezel_relay) { g_bezel_relay->stop(); delete g_bezel_relay; g_bezel_relay = nullptr; }
+    if (g_relay)       { g_relay->stop();       delete g_relay;       g_relay       = nullptr; }
     if (g_display) { g_display->shutdown(); delete g_display; g_display = nullptr; }
     if (g_conn)    { g_conn->shutdown(); delete g_conn; g_conn = nullptr; }
     if (g_settings){ g_settings->save(); delete g_settings; g_settings = nullptr; }

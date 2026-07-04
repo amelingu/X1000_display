@@ -14,7 +14,8 @@ public:
     UIManager();
     ~UIManager();
 
-    void init(SettingsManager* settings, RelayManager* relay, ApplyCallback on_apply);
+    void init(SettingsManager* settings, RelayManager* relay,
+              RelayManager* bezel_relay, ApplyCallback on_apply);
     void show(); void hide(); void toggle();
     bool isVisible() const;
     void tick(bool pfd_streaming, bool mfd_streaming,
@@ -48,7 +49,8 @@ private:
     void handleClick(int x, int y);
 
     SettingsManager* m_settings = nullptr;
-    RelayManager*    m_relay    = nullptr;
+    RelayManager*    m_relay        = nullptr;
+    RelayManager*    m_bezel_relay  = nullptr;
     ApplyCallback    m_on_apply;
 
     XPLMWindowID m_window   = nullptr;
@@ -66,8 +68,10 @@ private:
     char m_buf_width[8]     = "1024";
     char m_buf_quality[8]   = "85";
     char m_buf_fps[8]       = "15";
-    char m_buf_pc_ip[32]    = "";
-    int  m_active_field     = -1;
+    char m_buf_pc_ip[32]       = "";
+    char m_buf_pfd_mac[20]     = "";
+    char m_buf_mfd_mac[20]     = "";
+    int  m_active_field        = -1;
 
     int  m_log_scroll       = 0;
     bool m_show_log         = false;

@@ -46,19 +46,21 @@ public:
 private:
     void handlePacket(const std::string& msg,
                       const std::string& sender_ip,
-                      uint16_t           sender_port);
+                      uint16_t           sender_port,
+                      BezelSide          side);
     static int parseUKP(const std::string& msg);
-    BezelSide  sideForIP(const std::string& ip) const;
     void       sendHandshake(const std::string& msg, const iPadEndpoint& ep);
 
-    UDPSocket      m_recv_sock;   // bound to :15683
-    UDPSocket      m_send_sock;   // unbound, used for all outbound messages
+    UDPSocket      m_pfd_recv_sock;  // bound to :15683 — PFD bezel UKP
+    UDPSocket      m_mfd_recv_sock;  // bound to :15685 — MFD bezel UKP
+    UDPSocket      m_send_sock;      // unbound, used for all outbound messages
     UKPHandler     m_ukp;
     BacklightManager m_backlight;
 
     iPadEndpoint m_pfd_ep;
     iPadEndpoint m_mfd_ep;
 
-    static constexpr uint16_t RECV_PORT = 15683;
-    static constexpr uint16_t SEND_PORT = 15684;
+    static constexpr uint16_t PFD_RECV_PORT = 15683;
+    static constexpr uint16_t MFD_RECV_PORT = 15685;
+    static constexpr uint16_t SEND_PORT      = 15684;
 };

@@ -103,8 +103,8 @@ X1000_display/
 | Linux build | ✅ Working |
 | Windows build | ✅ Compiles (untested at runtime) |
 | macOS build | ⏳ Script ready, needs a Mac |
-| Bezel UKP command map | ✅ Complete (PFD + MFD) |
-| Bezel BLE input (x1000_bezel.py) | ✅ Working — awaiting BLE dongle for sim PC |
+| Bezel UKP command map | ✅ PFD + MFD complete, audio panel pending |
+| Bezel BLE input (x1000_bezel.py) | ✅ Working — PFD and MFD connected |
 | Backlight LED output | ✅ Protocol complete, pending verification |
 | X1000Viewer iOS app | 🔧 In progress |
 

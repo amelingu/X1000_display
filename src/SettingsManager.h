@@ -25,6 +25,14 @@ struct Settings {
 
     // Detected/configured PC IP (shown in setup guide)
     std::string pc_ip = "";
+
+    // Bezel Bluetooth MAC addresses
+    std::string pfd_bezel_mac = "";  // e.g. "00:07:80:A6:E1:71"
+    std::string mfd_bezel_mac = "";  // e.g. "00:07:80:A6:F5:0A"
+
+    // Bezel UDP ports
+    uint16_t bezel_pfd_port = 15683;
+    uint16_t bezel_mfd_port = 15685;
 };
 
 class SettingsManager {

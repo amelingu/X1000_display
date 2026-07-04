@@ -68,6 +68,10 @@ void SettingsManager::load() {
             else if (key == "window_y")        m_settings.window_y        = std::stoi(val);
             else if (key == "window_visible")  m_settings.window_visible  = (val == "1");
             else if (key == "pc_ip")           m_settings.pc_ip           = val;
+            else if (key == "pfd_bezel_mac")   m_settings.pfd_bezel_mac   = val;
+            else if (key == "mfd_bezel_mac")   m_settings.mfd_bezel_mac   = val;
+            else if (key == "bezel_pfd_port")  m_settings.bezel_pfd_port  = (uint16_t)std::stoi(val);
+            else if (key == "bezel_mfd_port")  m_settings.bezel_mfd_port  = (uint16_t)std::stoi(val);
         } catch (...) {}
     }
 
@@ -90,6 +94,11 @@ void SettingsManager::save() {
     f << "relay_pfd_port=" << m_settings.relay_pfd_port << "\n";
     f << "relay_mfd_port=" << m_settings.relay_mfd_port << "\n";
     f << "pc_ip="          << m_settings.pc_ip          << "\n\n";
+    f << "[bezel]\n";
+    f << "pfd_bezel_mac="  << m_settings.pfd_bezel_mac  << "\n";
+    f << "mfd_bezel_mac="  << m_settings.mfd_bezel_mac  << "\n";
+    f << "bezel_pfd_port=" << m_settings.bezel_pfd_port << "\n";
+    f << "bezel_mfd_port=" << m_settings.bezel_mfd_port << "\n\n";
     f << "[stream]\n";
     f << "stream_width="   << m_settings.stream_width   << "\n";
     f << "jpeg_quality="   << m_settings.jpeg_quality   << "\n";

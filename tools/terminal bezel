@@ -1,0 +1,4 @@
+python3 ~/Documents/X1000_display/tools/x1000_bezel.py \
+    --pfd 00:07:80:A6:E1:71 \
+    --mfd 00:07:80:A6:F5:0A \
+    --plugin-ip 127.0.0.1

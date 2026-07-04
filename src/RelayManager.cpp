@@ -15,15 +15,18 @@
 RelayManager::RelayManager()
     : m_pfd_port(9000), m_mfd_port(9001)
     , m_monitor_running(false)
+    , m_extra_args("")
 {}
 
 RelayManager::~RelayManager() { stop(); }
 
 void RelayManager::init(const std::string& path,
-                        uint16_t pfd_port, uint16_t mfd_port) {
+                        uint16_t pfd_port, uint16_t mfd_port,
+                        const std::string& extra_args) {
     m_script_path = path;
     m_pfd_port    = pfd_port;
     m_mfd_port    = mfd_port;
+    m_extra_args  = extra_args;
 }
 
 bool RelayManager::start() {
@@ -51,6 +54,19 @@ bool RelayManager::start() {
         "--pfd-port", pfd_str,
         "--mfd-port", mfd_str
     };
+    // Append extra args (e.g. --pfd MAC --mfd MAC for bezel script)
+    if (!m_extra_args.empty()) {
+        // Split on spaces
+        std::string token;
+        for (char c : m_extra_args) {
+            if (c == ' ') {
+                if (!token.empty()) { args.push_back(token); token.clear(); }
+            } else {
+                token += c;
+            }
+        }
+        if (!token.empty()) args.push_back(token);
+    }
 
     m_handle = Platform::spawnProcess(args);
     if (!m_handle.isValid()) {

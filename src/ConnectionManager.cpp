@@ -24,8 +24,12 @@ ConnectionManager::ConnectionManager() {
 }
 
 bool ConnectionManager::init() {
-    if (!m_recv_sock.bind(RECV_PORT)) {
-        XPLMDebugString("[X1000] ConnectionManager: failed to bind UDP :15683\n");
+    if (!m_pfd_recv_sock.bind(PFD_RECV_PORT)) {
+        XPLMDebugString("[X1000] ConnectionManager: failed to bind UDP :15683 (PFD)\n");
+        return false;
+    }
+    if (!m_mfd_recv_sock.bind(MFD_RECV_PORT)) {
+        XPLMDebugString("[X1000] ConnectionManager: failed to bind UDP :15685 (MFD)\n");
         return false;
     }
     // Send socket: bind to any port (OS picks one)
@@ -38,7 +42,7 @@ bool ConnectionManager::init() {
     m_ukp.init();
     m_backlight.init();
 
-    XPLMDebugString("[X1000] ConnectionManager: ready on UDP :15683\n");
+    XPLMDebugString("[X1000] ConnectionManager: ready on UDP :15683 (PFD) :15685 (MFD)\n");
 
     // Announce to both iPads
     sendHandshake("ClientComingX", m_pfd_ep);
@@ -50,8 +54,10 @@ bool ConnectionManager::init() {
 void ConnectionManager::poll() {
     std::string msg, sender_ip;
     uint16_t    sender_port;
-    while (m_recv_sock.recv(msg, sender_ip, sender_port))
-        handlePacket(msg, sender_ip, sender_port);
+    while (m_pfd_recv_sock.recv(msg, sender_ip, sender_port))
+        handlePacket(msg, sender_ip, sender_port, BezelSide::PFD);
+    while (m_mfd_recv_sock.recv(msg, sender_ip, sender_port))
+        handlePacket(msg, sender_ip, sender_port, BezelSide::MFD);
 }
 
 void ConnectionManager::tickBacklights() {
@@ -63,7 +69,8 @@ void ConnectionManager::tickBacklights() {
 void ConnectionManager::shutdown() {
     sendHandshake("ClientOut", m_pfd_ep);
     sendHandshake("ClientOut", m_mfd_ep);
-    m_recv_sock.close();
+    m_pfd_recv_sock.close();
+    m_mfd_recv_sock.close();
     m_send_sock.close();
     XPLMDebugString("[X1000] ConnectionManager: shutdown.\n");
 }
@@ -72,7 +79,8 @@ void ConnectionManager::shutdown() {
 
 void ConnectionManager::handlePacket(const std::string& msg,
                                      const std::string& sender_ip,
-                                     uint16_t           /*sender_port*/) {
+                                     uint16_t           /*sender_port*/,
+                                     BezelSide          side) {
     if (msg.find("ServerStart") == 0) {
         char buf[80];
         snprintf(buf, sizeof(buf),
@@ -103,7 +111,7 @@ void ConnectionManager::handlePacket(const std::string& msg,
             XPLMDebugString("[X1000] malformed UKP packet\n");
             return;
         }
-        m_ukp.handle((uint32_t)ukp, sideForIP(sender_ip));
+        m_ukp.handle((uint32_t)ukp, side);
         return;
     }
 
@@ -120,9 +128,7 @@ int ConnectionManager::parseUKP(const std::string& msg) {
     try { return std::stoi(val); } catch (...) { return -1; }
 }
 
-BezelSide ConnectionManager::sideForIP(const std::string& ip) const {
-    return (ip == m_mfd_ep.ip) ? BezelSide::MFD : BezelSide::PFD;
-}
+// sideForIP removed — side is now determined by which UDP port received the packet
 
 void ConnectionManager::sendHandshake(const std::string& msg,
                                       const iPadEndpoint& ep) {
