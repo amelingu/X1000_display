@@ -104,13 +104,13 @@ make_import_lib() {
         echo "  → $mingw_lib ($(du -h "$mingw_lib" | cut -f1))"
         # Verify __imp_ symbols were generated
         local imp_count
-        imp_count=$("$NM" "$mingw_lib" 2>/dev/null | grep -c "__imp_" || echo "0")
+        imp_count=$("$NM" "$mingw_lib" 2>/dev/null | grep -c "__imp_" || echo 0)
         echo "    __imp_ symbols: $imp_count"
         if [ "$imp_count" -eq 0 ]; then
             echo "  WARNING: No __imp_ symbols — trying without --leading-underscore..."
             "$DLLTOOL" --def "$deffile" --dllname "${name}.dll" \
                 --output-lib "$mingw_lib" --add-underscore
-            imp_count=$("$NM" "$mingw_lib" 2>/dev/null | grep -c "__imp_" || echo "0")
+            imp_count=$("$NM" "$mingw_lib" 2>/dev/null | grep -c "__imp_" || echo 0)
             echo "    __imp_ symbols after retry: $imp_count"
         fi
     else
@@ -240,6 +240,8 @@ if [ "${BUILD_STATUS:-0}" -ne 0 ]; then
 fi
 
 if grep -q "warning:" "$WARN_LOG" 2>/dev/null; then echo "  Warnings logged — see $WARN_LOG"; fi
+echo ""
+echo "✓ Build succeeded: $BUILD_DIR/X1000_display.xpl"
 
 # ---- Install ----------------------------------------------------------------
 if [[ "${1:-}" == "install" ]]; then
@@ -260,5 +262,6 @@ if [[ "${1:-}" == "install" ]]; then
     mkdir -p "$PLUGIN_DIR/win_x64" "$PLUGIN_DIR/tools"
     cp "$BUILD_DIR/X1000_display.xpl" "$PLUGIN_DIR/win_x64/X1000_display.xpl"
     cp "$SCRIPT_DIR/tools/x1000_relay.py" "$PLUGIN_DIR/tools/x1000_relay.py"
+    cp "$SCRIPT_DIR/tools/x1000_bezel.py" "$PLUGIN_DIR/tools/x1000_bezel.py"
     echo "✓ Installed to: $PLUGIN_DIR/win_x64/"
 fi

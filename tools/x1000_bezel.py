@@ -94,7 +94,29 @@ class BezelClient:
 
     async def connect(self):
         log.info(f"{self.name}: connecting to {self.mac}...")
-        await self.client.connect()
+        # If already connected from a previous session, disconnect first
+        try:
+            if self.client.is_connected:
+                await self.client.disconnect()
+                await asyncio.sleep(1.0)
+            # Recreate client to ensure clean state
+            self.client = BleakClient(self.mac)
+        except Exception:
+            self.client = BleakClient(self.mac)
+
+        # Retry loop — bezel may need a moment after previous session
+        for attempt in range(5):
+            try:
+                await self.client.connect()
+                break
+            except Exception as e:
+                log.warning(f"{self.name}: connect attempt {attempt+1}/5 failed: {e}")
+                if attempt < 4:
+                    await asyncio.sleep(2.0)
+                    self.client = BleakClient(self.mac)
+                else:
+                    raise
+
         log.info(f"{self.name}: connected")
 
         # Subscribe to notifications
@@ -206,9 +228,11 @@ async def main(args):
             await asyncio.sleep(2.0)
             for client in clients:
                 if not client.is_connected:
-                    log.warning(f"{client.name}: disconnected — reconnecting...")
+                    log.warning(f"{client.name}: disconnected — reconnecting in 3s...")
+                    await asyncio.sleep(3.0)
                     try:
                         await client.connect()
+                        log.info(f"{client.name}: reconnected successfully")
                     except Exception as e:
                         log.error(f"{client.name}: reconnect failed: {e}")
     except asyncio.CancelledError:

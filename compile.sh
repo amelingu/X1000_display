@@ -97,6 +97,8 @@ g++ "${CXXFLAGS[@]}" "${LDFLAGS[@]}" \
     -o "$BUILD_DIR/X1000_display.xpl" \
     2> >(grep -v "^$" | tee "$WARN_LOG" | grep -E "error:|warning:.*DisplayStreamer|warning:.*Plugin|warning:.*Connection|warning:.*UKP|warning:.*Backlight" >&2 || true)
 
+if grep -q "warning:" "$WARN_LOG" 2>/dev/null; then echo "  Warnings logged — see $WARN_LOG"; fi
+fi
 
 echo ""
 echo "✓ Build succeeded: $BUILD_DIR/X1000_display.xpl"
@@ -139,9 +141,11 @@ if [[ "${1:-}" == "install" ]]; then
     cp "$BUILD_DIR/X1000_display.xpl" "$PLATFORM_DIR/X1000_display.xpl"
     echo "✓ Plugin:  $PLATFORM_DIR/X1000_display.xpl"
 
-    # Install relay script
+    # Install relay scripts
     cp "$SCRIPT_DIR/tools/x1000_relay.py" "$TOOLS_DIR/x1000_relay.py"
     echo "✓ Relay:   $TOOLS_DIR/x1000_relay.py"
+    cp "$SCRIPT_DIR/tools/x1000_bezel.py" "$TOOLS_DIR/x1000_bezel.py"
+    echo "✓ Bezel:   $TOOLS_DIR/x1000_bezel.py"
     echo ""
     echo "Reload the plugin in X-Plane: Plugins → Plugin Admin → X1000 display → Reload"
 else

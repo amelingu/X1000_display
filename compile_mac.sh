@@ -111,5 +111,6 @@ if [[ "${1:-}" == "install" ]]; then
     mkdir -p "$PLUGIN_DIR/mac_x64" "$PLUGIN_DIR/tools"
     cp "$BUILD_FAT/X1000_display.xpl" "$PLUGIN_DIR/mac_x64/X1000_display.xpl"
     cp "$SCRIPT_DIR/tools/x1000_relay.py" "$PLUGIN_DIR/tools/x1000_relay.py"
+    cp "$SCRIPT_DIR/tools/x1000_bezel.py" "$PLUGIN_DIR/tools/x1000_bezel.py"
     echo "✓ Installed to: $PLUGIN_DIR/mac_x64/"
 fi
