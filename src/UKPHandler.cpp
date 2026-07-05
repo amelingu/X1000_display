@@ -1,7 +1,7 @@
 // UKPHandler.cpp — Full UKP → X-Plane command dispatch
 //
 // PFD side  → g1000n1_* commands  (autopilot, NAV, COM, FMS, audio panel)
-// MFD side  → g1000n2_* commands  (MFD softkeys, FMS, range)
+// MFD side  → g1000n3_* commands  (MFD softkeys, FMS, range)
 //
 // Audio panel UKP values (148/149, 146/147 AUDIO VOL and panel buttons)
 // are mapped to sim/cockpit2/radios/* datarefs where X-Plane has no
@@ -30,18 +30,18 @@ static std::unordered_map<uint32_t, CmdPair> buildMap() {
     // AUTOPILOT / FLIGHT DIRECTOR — PFD bezel only; same button exists on MFD
     // bezel in some configurations so we map n2_* defensively.
     // -----------------------------------------------------------------------
-    m[92]  = { "sim/GPS/g1000n1_ap",        "sim/GPS/g1000n2_ap"        };
-    m[64]  = { "sim/GPS/g1000n1_fd",        "sim/GPS/g1000n2_fd"        };
-    m[100] = { "sim/GPS/g1000n1_hdg",       "sim/GPS/g1000n2_hdg"       };
-    m[66]  = { "sim/GPS/g1000n1_alt",       "sim/GPS/g1000n2_alt"       };
-    m[98]  = { "sim/GPS/g1000n1_nav",       "sim/GPS/g1000n2_nav"       };
-    m[60]  = { "sim/GPS/g1000n1_vnv",       "sim/GPS/g1000n2_vnv"       };
-    m[96]  = { "sim/GPS/g1000n1_apr",       "sim/GPS/g1000n2_apr"       };
-    m[58]  = { "sim/GPS/g1000n1_bc",        "sim/GPS/g1000n2_bc"        };
-    m[94]  = { "sim/GPS/g1000n1_vs",        "sim/GPS/g1000n2_vs"        };
-    m[56]  = { "sim/GPS/g1000n1_nose_up",   "sim/GPS/g1000n2_nose_up"   };
-    m[90]  = { "sim/GPS/g1000n1_flc",       "sim/GPS/g1000n2_flc"       };
-    m[62]  = { "sim/GPS/g1000n1_nose_down", "sim/GPS/g1000n2_nose_down" };
+    m[92]  = { "sim/GPS/g1000n1_ap",        "sim/GPS/g1000n3_ap"        };
+    m[64]  = { "sim/GPS/g1000n1_fd",        "sim/GPS/g1000n3_fd"        };
+    m[100] = { "sim/GPS/g1000n1_hdg",       "sim/GPS/g1000n3_hdg"       };
+    m[66]  = { "sim/GPS/g1000n1_alt",       "sim/GPS/g1000n3_alt"       };
+    m[98]  = { "sim/GPS/g1000n1_nav",       "sim/GPS/g1000n3_nav"       };
+    m[60]  = { "sim/GPS/g1000n1_vnv",       "sim/GPS/g1000n3_vnv"       };
+    m[96]  = { "sim/GPS/g1000n1_apr",       "sim/GPS/g1000n3_apr"       };
+    m[58]  = { "sim/GPS/g1000n1_bc",        "sim/GPS/g1000n3_bc"        };
+    m[94]  = { "sim/GPS/g1000n1_vs",        "sim/GPS/g1000n3_vs"        };
+    m[56]  = { "sim/GPS/g1000n1_nose_up",   "sim/GPS/g1000n3_nose_up"   };
+    m[90]  = { "sim/GPS/g1000n1_flc",       "sim/GPS/g1000n3_flc"       };
+    m[62]  = { "sim/GPS/g1000n1_nose_down", "sim/GPS/g1000n3_nose_down" };
 
     // -----------------------------------------------------------------------
     // NAV / COM — PFD only (radio heads only on PFD bezel)
@@ -64,33 +64,34 @@ static std::unordered_map<uint32_t, CmdPair> buildMap() {
     // -----------------------------------------------------------------------
     // CURSOR / PAN — both sides have a joystick/cursor on their bezel
     // -----------------------------------------------------------------------
-    m[32]  = { "sim/GPS/g1000n1_pan_push",  "sim/GPS/g1000n2_pan_push"  };
-    m[198] = { "sim/GPS/g1000n1_pan_up",    "sim/GPS/g1000n2_pan_up"    };
-    m[200] = { "sim/GPS/g1000n1_pan_down",  "sim/GPS/g1000n2_pan_down"  };
-    m[194] = { "sim/GPS/g1000n1_pan_left",  "sim/GPS/g1000n2_pan_left"  };
-    m[196] = { "sim/GPS/g1000n1_pan_right", "sim/GPS/g1000n2_pan_right" };
+    m[32]  = { "sim/GPS/g1000n1_pan_push",  "sim/GPS/g1000n3_pan_push"  };
+    m[198] = { "sim/GPS/g1000n1_pan_up",    "sim/GPS/g1000n3_pan_up"    };
+    m[200] = { "sim/GPS/g1000n1_pan_down",  "sim/GPS/g1000n3_pan_down"  };
+    m[194] = { "sim/GPS/g1000n1_pan_left",  "sim/GPS/g1000n3_pan_left"  };
+    m[196] = { "sim/GPS/g1000n1_pan_right", "sim/GPS/g1000n3_pan_right" };
 
     // -----------------------------------------------------------------------
     // FMS / NAVIGATION — both sides have FMS knob and nav buttons
     // -----------------------------------------------------------------------
-    m[210] = { "sim/GPS/g1000n1_direct",    "sim/GPS/g1000n2_direct"    };
-    m[184] = { "sim/GPS/g1000n1_menu",      "sim/GPS/g1000n2_menu"      };
-    m[212] = { "sim/GPS/g1000n1_fpl",       "sim/GPS/g1000n2_fpl"       };
-    m[182] = { "sim/GPS/g1000n1_proc",      "sim/GPS/g1000n2_proc"      };
-    m[214] = { "sim/GPS/g1000n1_clr",       "sim/GPS/g1000n2_clr"       };
-    m[180] = { "sim/GPS/g1000n1_ent",       "sim/GPS/g1000n2_ent"       };
-    m[190] = { "sim/GPS/g1000n1_cursor",    "sim/GPS/g1000n2_cursor"    };
+    m[210] = { "sim/GPS/g1000n1_direct",    "sim/GPS/g1000n3_direct"    };
+    m[184] = { "sim/GPS/g1000n1_menu",      "sim/GPS/g1000n3_menu"      };
+    m[212] = { "sim/GPS/g1000n1_fpl",       "sim/GPS/g1000n3_fpl"       };
+    m[182] = { "sim/GPS/g1000n1_proc",      "sim/GPS/g1000n3_proc"      };
+    // CLR fires on release (odd), not press (even)
+    m[215] = { "sim/GPS/g1000n1_clr",       "sim/GPS/g1000n3_clr"       };  // CLR release
+    m[180] = { "sim/GPS/g1000n1_ent",       "sim/GPS/g1000n3_ent"       };
+    m[190] = { "sim/GPS/g1000n1_cursor",    "sim/GPS/g1000n3_cursor"    };
 
     // -----------------------------------------------------------------------
     // SOFTKEYS SK01–SK12
     // PFD softkeys: UKP 156,158,...,178  → g1000n1_softkey1..12
-    // MFD softkeys: same UKP range but from MFD iPad → g1000n2_softkey1..12
+    // MFD softkeys: same UKP range but from MFD iPad → g1000n3_softkey1..12
     // -----------------------------------------------------------------------
     for (int i = 0; i < 12; ++i) {
         uint32_t ukp = 156 + (uint32_t)(i * 2);
         char pfd[64], mfd_cmd[64];
         snprintf(pfd,     sizeof(pfd),     "sim/GPS/g1000n1_softkey%d", i + 1);
-        snprintf(mfd_cmd, sizeof(mfd_cmd), "sim/GPS/g1000n2_softkey%d", i + 1);
+        snprintf(mfd_cmd, sizeof(mfd_cmd), "sim/GPS/g1000n3_softkey%d", i + 1);
         m[ukp] = { pfd, mfd_cmd };
     }
 
@@ -119,14 +120,14 @@ static std::unordered_map<uint32_t, CmdPair> buildMap() {
     m[71]  = { "sim/GPS/g1000n1_alt_inner_down",  "" };
 
     // FMS outer / inner — both sides
-    m[40]  = { "sim/GPS/g1000n1_fms_outer_up",   "sim/GPS/g1000n2_fms_outer_up"   };
-    m[41]  = { "sim/GPS/g1000n1_fms_outer_down",  "sim/GPS/g1000n2_fms_outer_down" };
-    m[38]  = { "sim/GPS/g1000n1_fms_inner_up",   "sim/GPS/g1000n2_fms_inner_up"   };
-    m[39]  = { "sim/GPS/g1000n1_fms_inner_down",  "sim/GPS/g1000n2_fms_inner_down" };
+    m[40]  = { "sim/GPS/g1000n1_fms_outer_up",   "sim/GPS/g1000n3_fms_outer_up"   };
+    m[41]  = { "sim/GPS/g1000n1_fms_outer_down",  "sim/GPS/g1000n3_fms_outer_down" };
+    m[38]  = { "sim/GPS/g1000n1_fms_inner_up",   "sim/GPS/g1000n3_fms_inner_up"   };
+    m[39]  = { "sim/GPS/g1000n1_fms_inner_down",  "sim/GPS/g1000n3_fms_inner_down" };
 
     // RANGE / cursor — both sides
-    m[192] = { "sim/GPS/g1000n1_range_up",        "sim/GPS/g1000n2_range_up"       };
-    m[193] = { "sim/GPS/g1000n1_range_down",       "sim/GPS/g1000n2_range_down"     };
+    m[192] = { "sim/GPS/g1000n1_range_up",        "sim/GPS/g1000n3_range_up"       };
+    m[193] = { "sim/GPS/g1000n1_range_down",       "sim/GPS/g1000n3_range_down"     };
 
     // BARO — PFD only
     m[102] = { "sim/GPS/g1000n1_baro_up",         "" };
@@ -212,7 +213,34 @@ void UKPHandler::init() {
 }
 
 void UKPHandler::handle(uint32_t ukp, BezelSide side) {
-    if (side == BezelSide::PFD && ((ukp >= 43 && ukp <= 55) || (ukp >= 115 && ukp <= 135) || (ukp >= 139 && ukp <= 149))) { m_audio.handleUKP(ukp); return; }
+    // Route audio panel UKPs to AudioPanelManager (PFD side only)
+    if (side == BezelSide::PFD &&
+        ((ukp >= 43 && ukp <= 55) ||
+         (ukp >= 115 && ukp <= 135) ||
+         (ukp >= 139 && ukp <= 149))) {
+        m_audio.handleUKP(ukp);
+        return;
+    }
+
+    // MFD CLR press (214) — force MFD to NAV full screen, but only when
+    // DISPLAY BACKUP is OFF (MFD is in normal mode, not showing backup PFD)
+    if (side == BezelSide::MFD && ukp == 214) {
+        XPLMDataRef rev_dr = XPLMFindDataRef("sim/cockpit2/EFIS/G1000_reversionary_mode");
+        bool backup_active = false;
+        if (rev_dr) {
+            int vals[2] = {0, 0};
+            XPLMGetDatavi(rev_dr, vals, 0, 2);
+            backup_active = (vals[0] || vals[1]);
+        }
+        if (!backup_active) {
+            XPLMDataRef page_dr = XPLMFindDataRef("sim/cockpit/g1000/g1000_n2_page");
+            if (page_dr) {
+                XPLMSetDatai(page_dr, 0);
+                XPLMDebugString("[X1000] MFD CLR held — forced to NAV full screen\n");
+            }
+        }
+        return;
+    }
     if (!m_initialized) return;
 
     auto it = s_map.find(ukp);

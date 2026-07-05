@@ -37,6 +37,17 @@ static void setDisplayBackup(bool on) {
         int vals[2] = { on ? 1 : 0, on ? 1 : 0 };
         XPLMSetDatavi(dr, vals, 0, 2);
     }
+
+    if (!on) {
+        // Switch released — force MFD to NAV default page
+        XPLMDataRef page_dr = XPLMFindDataRef("sim/cockpit/g1000/g1000_n2_page");
+        if (page_dr) {
+            XPLMSetDatai(page_dr, 0);  // NAV - DEFAULT NAV = 0
+            XPLMDebugString("[X1000] AudioPanel: Display backup released — MFD forced to NAV\n");
+        } else {
+            XPLMDebugString("[X1000] AudioPanel: g1000_n2_page dataref not found\n");
+        }
+    }
 }
 
 void AudioPanelManager::init() {

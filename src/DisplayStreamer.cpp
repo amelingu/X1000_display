@@ -12,6 +12,7 @@
 
 #include "DisplayStreamer.h"
 #include <XPLMUtilities.h>
+#include <XPLMDataAccess.h>
 #include <XPLMGraphics.h>
 #include <cstdio>
 #include <cstring>
@@ -480,7 +481,23 @@ void DisplayStreamer::captureAndSend(int w, int h,
         return;
     }
 
-    // Scale and flip
+    // Read display brightness from dataref
+    // sim/cockpit2/electrical/display_screen_brightness
+    // Index 0 = PFD, index 2 = MFD (based on observed values)
+    static XPLMDataRef s_brightness_dr = nullptr;
+    if (!s_brightness_dr)
+        s_brightness_dr = XPLMFindDataRef("sim/cockpit2/electrical/display_screen_brightness");
+    float brightness = 1.0f;
+    if (s_brightness_dr) {
+        float vals[8] = {1,1,1,1,1,1,1,1};
+        XPLMGetDatavf(s_brightness_dr, vals, 0, 8);
+        // PFD=index 0, MFD=index 2
+        brightness = (name[0] == 'P') ? vals[0] : vals[2];
+        if (brightness < 0.1f) brightness = 0.1f;  // never go fully black
+        if (brightness > 1.0f) brightness = 1.0f;
+    }
+
+    // Scale and flip, applying brightness
     const int TARGET_W = m_cfg.stream_width & ~1;
     const int TARGET_H = (rh * TARGET_W / rw) & ~1;
     std::vector<uint8_t> scaled(TARGET_W * TARGET_H * 3);
@@ -494,7 +511,9 @@ void DisplayStreamer::captureAndSend(int w, int h,
             if (sx >= rw) sx = rw - 1;
             const uint8_t* src = &pixels[(sy * rw + sx) * 3];
             uint8_t* dst = &scaled[(dy * TARGET_W + dx) * 3];
-            dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2];
+            dst[0] = (uint8_t)(src[0] * brightness);
+            dst[1] = (uint8_t)(src[1] * brightness);
+            dst[2] = (uint8_t)(src[2] * brightness);
         }
     }
 
