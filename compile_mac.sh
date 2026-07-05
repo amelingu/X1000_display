@@ -38,6 +38,7 @@ mkdir -p "$BUILD_X64" "$BUILD_ARM" "$BUILD_FAT"
 SOURCES=(
     "$SRC_DIR/Platform.cpp"
     "$SRC_DIR/UDPSocket.cpp"
+    "$SRC_DIR/AudioPanelManager.cpp"
     "$SRC_DIR/UKPHandler.cpp"
     "$SRC_DIR/BacklightManager.cpp"
     "$SRC_DIR/ConnectionManager.cpp"
