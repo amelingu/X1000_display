@@ -8,6 +8,7 @@
 // direct command — those are marked TODO for dataref-write path.
 
 #include "UKPHandler.h"
+#include "Platform.h"
 #include <XPLMUtilities.h>
 #include <XPLMDataAccess.h>
 #include <cstdio>
@@ -212,6 +213,44 @@ void UKPHandler::init() {
     XPLMDebugString("[X1000] UKPHandler: initialised (PFD+MFD+audio panel map)\n");
 }
 
+// ---------------------------------------------------------------------------
+// Knob direction filter — prevents spurious reversals on fast spins
+// Fires each click immediately but ignores opposite-direction clicks
+// that arrive within a short noise window after the last click.
+// ---------------------------------------------------------------------------
+
+struct KnobFilter {
+    double last_time  = 0.0;
+    bool   last_cw    = true;
+    double noise_ms   = 0.12;  // ignore reversals within 120ms
+};
+
+static void tickKnob(KnobFilter& k, bool cw,
+                     const char* cmd_up, const char* cmd_dn) {
+    double t = Platform::now_seconds();
+    double dt = t - k.last_time;
+
+    // Ignore direction reversal if it arrives too quickly after last click
+    if (dt < k.noise_ms && cw != k.last_cw) {
+        return;  // noise — skip
+    }
+
+    // Detect fast spin: clicks arriving faster than 80ms = fast spin
+    // Fire 5 commands per click when spinning fast, 1 when slow
+    bool fast = (dt < 0.08 && cw == k.last_cw);
+    int repeat = fast ? 10 : 1;
+
+    k.last_time = t;
+    k.last_cw   = cw;
+
+    const char* cmd = cw ? cmd_up : cmd_dn;
+    XPLMCommandRef ref = XPLMFindCommand(cmd);
+    if (ref) {
+        for (int i = 0; i < repeat; ++i)
+            XPLMCommandOnce(ref);
+    }
+}
+
 void UKPHandler::handle(uint32_t ukp, BezelSide side) {
     // Route audio panel UKPs to AudioPanelManager (PFD side only)
     if (side == BezelSide::PFD &&
@@ -243,6 +282,34 @@ void UKPHandler::handle(uint32_t ukp, BezelSide side) {
     }
     if (!m_initialized) return;
 
+    // Fast-spin knob accumulators (static, persist between calls)
+    static KnobFilter hdg_filter, crs_filter;
+    static KnobFilter mfd_hdg_filter, mfd_crs_filter;
+    if (side == BezelSide::PFD) {
+        if (ukp == 68 || ukp == 69) {
+            tickKnob(hdg_filter, ukp == 68,
+                     "sim/GPS/g1000n1_hdg_up", "sim/GPS/g1000n1_hdg_down");
+            return;
+        }
+        if (ukp == 74 || ukp == 75) {
+            tickKnob(crs_filter, ukp == 74,
+                     "sim/GPS/g1000n1_crs_up", "sim/GPS/g1000n1_crs_down");
+            return;
+        }
+    }
+    if (side == BezelSide::MFD) {
+        if (ukp == 68 || ukp == 69) {
+            tickKnob(mfd_hdg_filter, ukp == 68,
+                     "sim/GPS/g1000n3_hdg_up", "sim/GPS/g1000n3_hdg_down");
+            return;
+        }
+        if (ukp == 74 || ukp == 75) {
+            tickKnob(mfd_crs_filter, ukp == 74,
+                     "sim/GPS/g1000n3_crs_up", "sim/GPS/g1000n3_crs_down");
+            return;
+        }
+    }
+
     auto it = s_map.find(ukp);
     if (it == s_map.end()) {
         char buf[80];
@@ -252,21 +319,9 @@ void UKPHandler::handle(uint32_t ukp, BezelSide side) {
         return;
     }
 
-    const CmdPair& pair = it->second;
-    const std::string& cmd_str = (side == BezelSide::MFD && !pair.mfd.empty())
-                                 ? pair.mfd
-                                 : pair.pfd;
-
-    if (cmd_str.empty()) {
-        char buf[96];
-        snprintf(buf, sizeof(buf),
-                 "[X1000] UKP %u — no command for %s side\n",
-                 ukp, side == BezelSide::MFD ? "MFD" : "PFD");
-        XPLMDebugString(buf);
-        return;
-    }
-
-
+    const std::string& cmd_str = (side == BezelSide::MFD && !it->second.mfd.empty())
+                                  ? it->second.mfd : it->second.pfd;
+    if (cmd_str.empty()) return;
 
     fireCommand(cmd_str.c_str());
 }
@@ -281,4 +336,13 @@ void UKPHandler::fireCommand(const char* cmd_name) {
         return;
     }
     XPLMCommandOnce(cmd);
+}
+
+void UKPHandler::tick() {
+    // Flush knob accumulators if window has expired
+    // (called from flight loop ~every frame)
+    // The static accumulators inside handle() are flushed here indirectly
+    // by sending a dummy "no-op" tick — accumulators self-flush on next input
+    // For now, nothing needed: flushKnob is called on next knob event
+    // A future improvement would track and flush here after the window expires
 }

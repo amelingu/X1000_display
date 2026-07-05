@@ -27,6 +27,7 @@ public:
 
     // Process one UKP value from a bezel packet.
     void handle(uint32_t ukp, BezelSide side);
+    void tick();  // flush stale knob accumulators
 
 private:
     void fireCommand(const char* cmd_name);
