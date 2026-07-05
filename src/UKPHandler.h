@@ -27,7 +27,21 @@ public:
 
     // Process one UKP value from a bezel packet.
     void handle(uint32_t ukp, BezelSide side);
-    void tick();  // flush stale knob accumulators
+    void tick();  // called every flight loop frame — fires held-button repeats
+
+    // Hold-repeat state — public so Plugin.cpp flight loop can call tick()
+    struct HoldKey {
+        uint32_t    press_ukp  = 0;      // even UKP that started the hold
+        uint32_t    release_ukp = 0;     // odd UKP that ends the hold
+        const char* pfd_cmd    = nullptr;
+        const char* mfd_cmd    = nullptr;
+        BezelSide   side       = BezelSide::PFD;
+        bool        held       = false;
+        double      press_time = 0.0;
+        double      last_fire  = 0.0;
+        double      delay_s    = 0.5;   // initial delay before repeat
+        double      rate_s     = 0.2;   // interval between repeats (5/sec)
+    };
 
 private:
     void fireCommand(const char* cmd_name);

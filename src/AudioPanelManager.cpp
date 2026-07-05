@@ -31,24 +31,40 @@ static void fire(const char* cmd_name) {
 }
 
 static void setDisplayBackup(bool on) {
-    fire("sim/GPS/G1000_display_reversion");
+    // On first call, state is unknown — force dataref directly without toggle.
+    // On subsequent calls, only toggle if needed.
+    static bool s_initialized = false;
+
     XPLMDataRef dr = XPLMFindDataRef("sim/cockpit2/EFIS/G1000_reversionary_mode");
     if (dr) {
-        int vals[2] = { on ? 1 : 0, on ? 1 : 0 };
-        XPLMSetDatavi(dr, vals, 0, 2);
-    }
-
-    if (!on) {
-        // Switch released — force MFD to NAV default page
-        XPLMDataRef page_dr = XPLMFindDataRef("sim/cockpit/g1000/g1000_n2_page");
-        if (page_dr) {
-            XPLMSetDatai(page_dr, 0);  // NAV - DEFAULT NAV = 0
-            XPLMDebugString("[X1000] AudioPanel: Display backup released — MFD forced to NAV\n");
+        if (s_initialized) {
+            // Check current state and only fire toggle if needed
+            int vals[2] = {0, 0};
+            XPLMGetDatavi(dr, vals, 0, 2);
+            bool currently_on = (vals[0] != 0 || vals[1] != 0);
+            if (currently_on != on)
+                fire("sim/GPS/G1000_display_reversion");
         } else {
-            XPLMDebugString("[X1000] AudioPanel: g1000_n2_page dataref not found\n");
+            // First call — we don't know if sim state matches switch position.
+            // Read current sim state: if it doesn't match desired, toggle.
+            int vals[2] = {0, 0};
+            XPLMGetDatavi(dr, vals, 0, 2);
+            bool currently_on = (vals[0] != 0 || vals[1] != 0);
+            if (currently_on != on)
+                fire("sim/GPS/G1000_display_reversion");
+            s_initialized = true;
+            XPLMDebugString(on ? "[X1000] AudioPanel: Display backup ON (init)\n"
+                               : "[X1000] AudioPanel: Display backup OFF (init)\n");
         }
+        // Always force the dataref to desired state
+        int nv[2] = { on ? 1 : 0, on ? 1 : 0 };
+        XPLMSetDatavi(dr, nv, 0, 2);
+    } else {
+        fire("sim/GPS/G1000_display_reversion");
     }
 }
+
+    // Display backup released — MFD NAV page is handled by CLR long press on the bezel
 
 void AudioPanelManager::init() {
     XPLMDebugString("[X1000] AudioPanelManager: initialised\n");

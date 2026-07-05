@@ -93,6 +93,7 @@ static void initDisplay() {
 
 static float flightLoopCB(float /*elapsed*/, float /*flightLoop*/, int /*count*/, void*) {
     if (g_conn)    g_conn->poll();
+    if (g_conn)    g_conn->tickUKP();
     if (g_conn)    g_conn->tickBacklights();
     if (g_display) g_display->tick();
 

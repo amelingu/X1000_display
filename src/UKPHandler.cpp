@@ -251,7 +251,50 @@ static void tickKnob(KnobFilter& k, bool cw,
     }
 }
 
+// ---------------------------------------------------------------------------
+// Hold-repeat keys — press fires once immediately, held fires at 5Hz after 0.5s
+// ---------------------------------------------------------------------------
+
+static UKPHandler::HoldKey s_hold_keys[] = {
+    // NOSE UP/DOWN — no acceleration needed, fixed 5/sec
+    { 56, 57, "sim/GPS/g1000n1_nose_up",   "sim/GPS/g1000n3_nose_up",   BezelSide::PFD, false, 0, 0, 0.5, 0.2 },
+    { 62, 63, "sim/GPS/g1000n1_nose_down", "sim/GPS/g1000n3_nose_down", BezelSide::PFD, false, 0, 0, 0.5, 0.2 },
+    // CURSOR keys — with acceleration (starts 5/sec, +5/sec every second, cap 20/sec)
+    { 198, 199, "sim/GPS/g1000n1_pan_up",    "sim/GPS/g1000n3_pan_up",    BezelSide::PFD, false, 0, 0, 0.5, 0.2 },
+    { 200, 201, "sim/GPS/g1000n1_pan_down",  "sim/GPS/g1000n3_pan_down",  BezelSide::PFD, false, 0, 0, 0.5, 0.2 },
+    { 194, 195, "sim/GPS/g1000n1_pan_left",  "sim/GPS/g1000n3_pan_left",  BezelSide::PFD, false, 0, 0, 0.5, 0.2 },
+    { 196, 197, "sim/GPS/g1000n1_pan_right", "sim/GPS/g1000n3_pan_right", BezelSide::PFD, false, 0, 0, 0.5, 0.2 },
+};
+static constexpr int N_HOLD_KEYS = 6;
+// Cursor keys start at index 2 — these get acceleration
+static constexpr int CURSOR_KEY_START = 2;
+
+static bool handleHoldKey(uint32_t ukp, BezelSide side) {
+    for (int i = 0; i < N_HOLD_KEYS; ++i) {
+        auto& k = s_hold_keys[i];
+        if (ukp == k.press_ukp) {
+            // Press — fire immediately and start hold timer
+            const char* cmd = (side == BezelSide::MFD) ? k.mfd_cmd : k.pfd_cmd;
+            XPLMCommandRef ref = XPLMFindCommand(cmd);
+            if (ref) XPLMCommandOnce(ref);
+            k.held       = true;
+            k.side       = side;
+            k.press_time = Platform::now_seconds();
+            k.last_fire  = k.press_time;
+            return true;
+        }
+        if (ukp == k.release_ukp && k.held) {
+            k.held = false;
+            return true;
+        }
+    }
+    return false;
+}
+
 void UKPHandler::handle(uint32_t ukp, BezelSide side) {
+    // Check hold-repeat keys first
+    if (handleHoldKey(ukp, side)) return;
+
     // Route audio panel UKPs to AudioPanelManager (PFD side only)
     if (side == BezelSide::PFD &&
         ((ukp >= 43 && ukp <= 55) ||
@@ -339,10 +382,32 @@ void UKPHandler::fireCommand(const char* cmd_name) {
 }
 
 void UKPHandler::tick() {
-    // Flush knob accumulators if window has expired
-    // (called from flight loop ~every frame)
-    // The static accumulators inside handle() are flushed here indirectly
-    // by sending a dummy "no-op" tick — accumulators self-flush on next input
-    // For now, nothing needed: flushKnob is called on next knob event
-    // A future improvement would track and flush here after the window expires
+    double now = Platform::now_seconds();
+    for (int i = 0; i < N_HOLD_KEYS; ++i) {
+        auto& k = s_hold_keys[i];
+        if (!k.held) continue;
+        double held_for = now - k.press_time;
+        // Wait for initial delay before repeating
+        if (held_for < k.delay_s) continue;
+
+        // Compute current rate with acceleration for cursor keys
+        double rate = k.rate_s;
+        if (i >= CURSOR_KEY_START) {
+            // Accelerate: +5/sec every second held (after initial delay)
+            // 0-1s: 5/sec (rate=0.20s), 1-2s: 10/sec (rate=0.10s),
+            // 2-3s: 15/sec (rate=0.067s), 3s+: 20/sec (rate=0.05s, cap)
+            double accel_time = held_for - k.delay_s;
+            int tier = (int)(accel_time);  // 0,1,2,3...
+            if (tier > 3) tier = 3;        // cap at tier 3 = 20/sec
+            double rates[] = { 0.20, 0.10, 0.067, 0.05 };
+            rate = rates[tier];
+        }
+
+        if (now - k.last_fire >= rate) {
+            const char* cmd = (k.side == BezelSide::MFD) ? k.mfd_cmd : k.pfd_cmd;
+            XPLMCommandRef ref = XPLMFindCommand(cmd);
+            if (ref) XPLMCommandOnce(ref);
+            k.last_fire = now;
+        }
+    }
 }

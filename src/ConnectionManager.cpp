@@ -60,6 +60,10 @@ void ConnectionManager::poll() {
         handlePacket(msg, sender_ip, sender_port, BezelSide::MFD);
 }
 
+void ConnectionManager::tickUKP() {
+    m_ukp.tick();
+}
+
 void ConnectionManager::tickBacklights() {
     m_backlight.tick(m_send_sock,
                      m_pfd_ep.ip, m_mfd_ep.ip,

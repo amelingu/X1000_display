@@ -34,6 +34,7 @@ public:
 
     bool init();
     void poll();           // drain receive buffer — call every frame
+    void tickUKP();         // fires held-button repeats
     void tickBacklights(); // send backlight updates — call every frame (rate-limited internally)
     void shutdown();
 
