@@ -212,6 +212,17 @@ PLUGIN_API int XPluginEnable() {
                             bezel_args);
 
         if (!bs.pfd_bezel_mac.empty() || !bs.mfd_bezel_mac.empty()) {
+            XPLMDebugString("[X1000] Bezel: disconnecting any existing BLE connections...\n");
+            // Force BlueZ to disconnect from bezels so bleak can reconnect cleanly
+            if (!bs.pfd_bezel_mac.empty()) {
+                std::string cmd = "bluetoothctl disconnect " + bs.pfd_bezel_mac + " 2>/dev/null";
+                system(cmd.c_str());
+            }
+            if (!bs.mfd_bezel_mac.empty()) {
+                std::string cmd = "bluetoothctl disconnect " + bs.mfd_bezel_mac + " 2>/dev/null";
+                system(cmd.c_str());
+            }
+            system("sleep 1");
             XPLMDebugString("[X1000] Bezel: starting BLE bridge...\n");
             g_bezel_relay->start();
         } else {

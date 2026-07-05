@@ -1,4 +1,5 @@
 #pragma once
+#include "AudioPanelManager.h"
 // UKPHandler.h — Maps Simionic bezel UKP values → X-Plane commands
 //
 // Protocol rules:
@@ -31,4 +32,5 @@ private:
     void fireCommand(const char* cmd_name);
 
     bool m_initialized;
+    AudioPanelManager m_audio;
 };

@@ -153,40 +153,41 @@ static std::unordered_map<uint32_t, CmdPair> buildMap() {
     // Note: X-Plane 12 G1000 audio panel buttons are exposed as commands
     // under sim/GPS/g1000n1_*. Volume knobs are dataref-only in default C172.
     //
+    // Audio panel buttons send only the release (odd) value — map those
     // MIC select buttons
-    m[42]  = { "sim/GPS/g1000n1_com1_mic",        "" };  // COM1/MIC
-    m[44]  = { "sim/GPS/g1000n1_com2_mic",        "" };  // COM2/MIC
-    m[46]  = { "sim/GPS/g1000n1_com3_mic",        "" };  // COM3/MIC (if fitted)
+    m[43]  = { "sim/GPS/g1000n1_com1_mic",        "" };  // COM1/MIC release
+    m[45]  = { "sim/GPS/g1000n1_com2_mic",        "" };  // COM2/MIC release
+    m[47]  = { "sim/GPS/g1000n1_com3_mic",        "" };  // COM3/MIC release
     // COM monitor buttons
-    m[50]  = { "sim/GPS/g1000n1_com1",            "" };  // COM1 monitor
-    m[52]  = { "sim/GPS/g1000n1_com2",            "" };  // COM2 monitor
-    m[54]  = { "sim/GPS/g1000n1_com3",            "" };  // COM3 monitor (if fitted)
+    m[51]  = { "sim/GPS/g1000n1_com1",            "" };  // COM1 monitor release
+    m[53]  = { "sim/GPS/g1000n1_com2",            "" };  // COM2 monitor release
+    m[55]  = { "sim/GPS/g1000n1_com3",            "" };  // COM3 monitor release
     // COM1/2 toggle
-    m[48]  = { "sim/GPS/g1000n1_com12",           "" };  // COM1/2
+    m[49]  = { "sim/GPS/g1000n1_com12",           "" };  // COM1/2 release
     // NAV monitor buttons
-    m[130] = { "sim/GPS/g1000n1_nav1",            "" };  // NAV1
-    m[132] = { "sim/GPS/g1000n1_nav2",            "" };  // NAV2
-    m[126] = { "sim/GPS/g1000n1_adf",             "" };  // ADF
-    m[124] = { "sim/GPS/g1000n1_dme",             "" };  // DME
-    m[128] = { "sim/GPS/g1000n1_aux",             "" };  // AUX
+    m[131] = { "sim/GPS/g1000n1_nav1",            "" };  // NAV1 release
+    m[133] = { "sim/GPS/g1000n1_nav2",            "" };  // NAV2 release
+    m[127] = { "sim/GPS/g1000n1_adf",             "" };  // ADF release
+    m[125] = { "sim/GPS/g1000n1_dme",             "" };  // DME release
+    m[129] = { "sim/GPS/g1000n1_aux",             "" };  // AUX release
     // Speaker / headphone
-    m[118] = { "sim/GPS/g1000n1_spkr",            "" };  // SPKR
+    m[119] = { "sim/GPS/g1000n1_spkr",            "" };  // SPKR release
     // Marker beacon
-    m[120] = { "sim/GPS/g1000n1_mkr_mute",        "" };  // MKR/MUTE
-    m[122] = { "sim/GPS/g1000n1_hi_sens",         "" };  // HI SENS
+    m[121] = { "sim/GPS/g1000n1_mkr_mute",        "" };  // MKR/MUTE release
+    m[123] = { "sim/GPS/g1000n1_hi_sens",         "" };  // HI SENS release
     // Special buttons
-    m[114] = { "sim/GPS/g1000n1_tel",             "" };  // TEL
-    m[116] = { "sim/GPS/g1000n1_pa",              "" };  // PA
-    m[134] = { "sim/GPS/g1000n1_man_sq",          "" };  // MAN SQ
-    m[136] = { "sim/GPS/g1000n1_play",            "" };  // PLAY
+    m[115] = { "sim/GPS/g1000n1_tel",             "" };  // TEL release
+    m[117] = { "sim/GPS/g1000n1_pa",              "" };  // PA release
+    m[135] = { "sim/GPS/g1000n1_man_sq",          "" };  // MAN SQ release
+    m[137] = { "sim/GPS/g1000n1_play",            "" };  // PLAY release
     // Pilot/Copilot select
-    m[138] = { "sim/GPS/g1000n1_pilot",           "" };  // PILOT
-    m[140] = { "sim/GPS/g1000n1_coplt",           "" };  // COPILOT
+    m[139] = { "sim/GPS/g1000n1_pilot",           "" };  // PILOT release
+    m[141] = { "sim/GPS/g1000n1_coplt",           "" };  // COPILOT release
     // Display backup
-    m[142] = { "sim/GPS/g1000n1_display_backup",  "" };  // DISPLAY BACKUP
-    // Pilot volume knob — press
-    m[144] = { "sim/GPS/g1000n1_pilot_knob",      "" };  // PILOT KNOB PRESS
-    // Pilot inner volume knob CW/CCW
+    m[143] = { "sim/GPS/g1000n1_display_backup",  "" };  // DISPLAY BACKUP release
+    // Pilot volume knob press
+    m[145] = { "sim/GPS/g1000n1_pilot_knob",      "" };  // PILOT KNOB PRESS release
+    // Pilot inner volume knob CW/CCW (knobs send odd values too)
     m[146] = { "sim/GPS/g1000n1_pilot_vol_up",    "" };  // PILOT INNER CW
     m[147] = { "sim/GPS/g1000n1_pilot_vol_dn",    "" };  // PILOT INNER CCW
     // Passenger outer volume knob CW/CCW
@@ -206,10 +207,12 @@ UKPHandler::UKPHandler() : m_initialized(false) {}
 void UKPHandler::init() {
     s_map = buildMap();
     m_initialized = true;
+    m_audio.init();
     XPLMDebugString("[X1000] UKPHandler: initialised (PFD+MFD+audio panel map)\n");
 }
 
 void UKPHandler::handle(uint32_t ukp, BezelSide side) {
+    if (side == BezelSide::PFD && ((ukp >= 43 && ukp <= 55) || (ukp >= 115 && ukp <= 135) || (ukp >= 139 && ukp <= 149))) { m_audio.handleUKP(ukp); return; }
     if (!m_initialized) return;
 
     auto it = s_map.find(ukp);

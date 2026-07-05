@@ -38,7 +38,13 @@ bool RelayManager::start() {
     auto slash = script_name.rfind('/');
     if (slash != std::string::npos) script_name = script_name.substr(slash + 1);
     if (!script_name.empty()) {
-        std::string kill_cmd = "pkill -f "" + script_name + "" 2>/dev/null; sleep 0.5";
+        std::string kill_cmd = "pkill -f \"" + script_name + "\" 2>/dev/null";
+        system(kill_cmd.c_str());
+        // Longer wait for bezel script so BLE stack releases connections
+        if (script_name.find("bezel") != std::string::npos)
+            system("sleep 2");
+        else
+            system("sleep 0.5");
         system(kill_cmd.c_str());
     }
 
