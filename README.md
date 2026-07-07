@@ -133,8 +133,8 @@ X1000_display/
 
 | Component | Model | Notes |
 |---|---|---|
-| PFD bezel | Simionic SHB1000S | Bluetooth LE, audio panel attached |
-| MFD bezel | Simionic SHB1000S | Bluetooth LE |
+| PFD bezel | Simionic SHB1000S (or later variants) | Bluetooth LE, audio panel attached |
+| MFD bezel | Simionic SHB1000S (or later variants) | Bluetooth LE |
 | BLE adapter | Any USB BT5.0 dongle | e.g. TP-Link UB500 — built-in BT works too |
 | PFD display | iPad (any) | Safari or X1000Viewer |
 | MFD display | iPad (any) | Safari or X1000Viewer |
@@ -166,33 +166,129 @@ X1000_display/
 
 ## Building and Installing
 
-### Linux
+### Prerequisites (all platforms)
+
+**1. Clone the repository**
 ```bash
+git clone https://github.com/amelingu/X1000_display.git
+cd X1000_display
+```
+
+**2. Download the X-Plane SDK**
+- Register (free) at [developer.x-plane.com](https://developer.x-plane.com)
+- Download the SDK (version 4.1+)
+- Extract so the structure is:
+```
+X1000_display/
+└── SDK/
+    ├── CHeaders/
+    │   ├── XPLM/
+    │   └── Widgets/
+    └── Libraries/
+        ├── Lin/
+        ├── Win/
+        └── Mac/
+```
+
+**3. Install Python dependencies** (for relay and bezel scripts)
+```bash
+pip install bleak --break-system-packages   # Linux/Mac
+pip install bleak                            # Windows
+```
+
+---
+
+### Linux (native build)
+
+**Requirements:**
+```bash
+sudo apt install build-essential libgl-dev
+```
+
+**Build and install:**
+```bash
+chmod +x compile.sh
 ./compile.sh install
 ```
 
+X-Plane 12 is auto-detected at `~/Bureau/X-Plane 12` or `~/X-Plane 12`.
+Override with: `XP12="/path/to/X-Plane 12" ./compile.sh install`
+
+---
+
 ### Windows (cross-compile from Linux)
+
+**Requirements:**
 ```bash
 sudo apt install mingw-w64
-./compile_win.sh install
 ```
 
-### macOS (run on a Mac)
+**Build:**
+```bash
+chmod +x compile_win.sh
+./compile_win.sh
+```
+
+**Install on Windows PC:**
+
+Copy the following to the Windows X-Plane installation:
+```
+build/win_x64/X1000_display.xpl  →  <XP12>/Resources/plugins/X1000_display/win_x64/
+tools/x1000_relay.py              →  <XP12>/Resources/plugins/X1000_display/tools/
+tools/x1000_bezel.py              →  <XP12>/Resources/plugins/X1000_display/tools/
+```
+
+**Python on Windows:**
+- Download Python 3 from [python.org](https://python.org) — check **"Add to PATH"** during install
+- Then: `pip install bleak`
+
+**First run on Windows:**
+- Start X-Plane, load G1000 aircraft, pop out PFD and MFD windows
+- Open **Plugins → X1000 Display → Settings**
+- Click **[Scan BLE]** to find bezels automatically
+- Click **[Use]** next to each found bezel to assign PFD/MFD
+- Click **[Apply & Restart Stream]**
+
+---
+
+### macOS (must run on a Mac)
+
+**Requirements:**
 ```bash
 xcode-select --install
+```
+
+**Build and install:**
+```bash
+chmod +x compile_mac.sh
 ./compile_mac.sh install
 ```
 
-All three install to:
+X-Plane 12 is auto-detected at `~/X-Plane 12`.
+Override with: `XP12="/path/to/X-Plane 12" ./compile_mac.sh install`
+
+The script produces a **universal binary** (x86_64 + arm64) in `build/mac_fat/`.
+
+> **Note:** Cross-compiling for macOS from Linux requires osxcross and an Apple SDK — significantly more complex. Running `compile_mac.sh` on a Mac is strongly recommended.
+
+---
+
+### Installed layout (all platforms)
+
+After installation, the plugin folder contains:
 ```
 <X-Plane 12>/Resources/plugins/X1000_display/
-├── lin_x64/X1000_display.xpl
-├── win_x64/X1000_display.xpl
-├── mac_x64/X1000_display.xpl
-└── tools/
-    ├── x1000_relay.py
-    └── x1000_bezel.py
+├── lin_x64/X1000_display.xpl     ← Linux
+├── win_x64/X1000_display.xpl     ← Windows
+├── mac_x64/X1000_display.xpl     ← macOS
+├── tools/
+│   ├── x1000_relay.py            ← auto-launched by plugin
+│   └── x1000_bezel.py            ← auto-launched by plugin
+└── X1000_display.ini             ← auto-created on first run, shared by all platforms
 ```
+
+X-Plane automatically loads the correct binary for the running OS.
+All three platform binaries coexist in the same folder and share the same ini file.
 
 ---
 
@@ -259,6 +355,28 @@ The plugin sends `ClientAv|BL_*=` backlight packets via UDP, but the SHB1000S fi
 | COM1/2 toggle | `sim/GPS/g1000n1_com12` |
 
 Buttons not implemented in default C172: COM3, TEL, PA, AUX, MAN SQ, PLAY, PILOT, COPLT (no X-Plane commands exist for these in the default aircraft).
+
+---
+
+## Tuning
+
+### Heading / Course Knob Feel
+
+All tuning parameters are defined at the **top of `src/UKPHandler.cpp`** in a dedicated section. Edit them there and recompile.
+
+| Define | Default | Effect |
+|---|---|---|
+| `KNOB_NOISE_MS` | 0.12s | Direction noise filter — opposite clicks within this window are ignored |
+| `KNOB_FAST_THRESHOLD` | 0.08s | Clicks faster than this trigger fast-spin mode |
+| `KNOB_FAST_REPEAT` | 10 | Commands fired per click in fast-spin mode |
+| `HOLD_DELAY_S` | 0.5s | Hold time before NOSE UP/DOWN and cursor keys start repeating |
+| `HOLD_RATE_S` | 0.2s | Repeat interval (0.2 = 5/sec) for NOSE UP/DOWN |
+
+**Rules:**
+- `KNOB_NOISE_MS` must be ≥ `KNOB_FAST_THRESHOLD` to avoid filtering valid fast clicks
+- Bug moves too slowly during fast spin → decrease `KNOB_NOISE_MS`
+- Fast-spin requires too much speed → increase `KNOB_FAST_THRESHOLD`
+- Recommended alternative: `KNOB_NOISE_MS = 0.10`, `KNOB_FAST_THRESHOLD = 0.12`
 
 ---
 

@@ -2,6 +2,7 @@
 
 #include "Platform.h"
 #include "ConnectionManager.h"
+#include "UKPHandler.h"
 #include "DisplayStreamer.h"
 #include "SettingsManager.h"
 #include "RelayManager.h"
@@ -39,6 +40,16 @@ static void applySettings() {
     // Restart relay with new ports
     if (g_relay) {
         g_relay->restart(s.relay_pfd_port, s.relay_mfd_port);
+    }
+
+    // Restart bezel relay with (potentially new) MAC addresses
+    if (g_bezel_relay) {
+        g_bezel_relay->stop();
+        std::string bezel_args;
+        if (!s.pfd_bezel_mac.empty()) bezel_args += "--pfd " + s.pfd_bezel_mac + " ";
+        if (!s.mfd_bezel_mac.empty()) bezel_args += "--mfd " + s.mfd_bezel_mac + " ";
+        bezel_args += "--plugin-ip 127.0.0.1";
+        g_bezel_relay->restart_with_args(bezel_args);
     }
 
     // Reinit display streamer with new quality settings
@@ -94,6 +105,13 @@ static void initDisplay() {
 static float flightLoopCB(float /*elapsed*/, float /*flightLoop*/, int /*count*/, void*) {
     if (g_conn)    g_conn->poll();
     if (g_conn)    g_conn->tickUKP();
+    if (g_ui && g_conn && g_settings) {
+        const Settings& s = g_settings->get();
+        BezelSide side = g_conn->lastUKPSide();
+        const std::string& mac = (side == BezelSide::PFD)
+                                  ? s.pfd_bezel_mac : s.mfd_bezel_mac;
+        if (!mac.empty()) g_ui->notifyScanActivity(mac);
+    }
     if (g_conn)    g_conn->tickBacklights();
     if (g_display) g_display->tick();
 
@@ -189,7 +207,7 @@ PLUGIN_API int XPluginEnable() {
     //   <XP12>/Resources/plugins/X1000_display/tools/x1000_relay.py
     // g_plugin_dir is .../X1000_display/lin_x64 so go up one level
     g_relay = new RelayManager();
-    std::string relay_path = g_plugin_dir + "/../tools/x1000_relay.py";
+    std::string relay_path = Platform::normalisePath(g_plugin_dir + "/../tools/x1000_relay.py");
     g_relay->init(relay_path,
                   g_settings->get().relay_pfd_port,
                   g_settings->get().relay_mfd_port);
@@ -198,7 +216,7 @@ PLUGIN_API int XPluginEnable() {
     // Bezel BLE bridge
     g_bezel_relay = new RelayManager();
     {
-        std::string bezel_path = g_plugin_dir + "/../tools/x1000_bezel.py";
+        std::string bezel_path = Platform::normalisePath(g_plugin_dir + "/../tools/x1000_bezel.py");
         const Settings& bs = g_settings->get();
         std::string bezel_args;
         if (!bs.pfd_bezel_mac.empty())
@@ -217,13 +235,13 @@ PLUGIN_API int XPluginEnable() {
             // Force BlueZ to disconnect from bezels so bleak can reconnect cleanly
             if (!bs.pfd_bezel_mac.empty()) {
                 std::string cmd = "bluetoothctl disconnect " + bs.pfd_bezel_mac + " 2>/dev/null";
-                system(cmd.c_str());
+                { int r = system(cmd.c_str()); (void)r; }
             }
             if (!bs.mfd_bezel_mac.empty()) {
                 std::string cmd = "bluetoothctl disconnect " + bs.mfd_bezel_mac + " 2>/dev/null";
-                system(cmd.c_str());
+                { int r = system(cmd.c_str()); (void)r; }
             }
-            system("sleep 1");
+            { int r = system("sleep 1"); (void)r; }
             XPLMDebugString("[X1000] Bezel: starting BLE bridge...\n");
             g_bezel_relay->start();
         } else {

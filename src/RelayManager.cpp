@@ -39,13 +39,13 @@ bool RelayManager::start() {
     if (slash != std::string::npos) script_name = script_name.substr(slash + 1);
     if (!script_name.empty()) {
         std::string kill_cmd = "pkill -f \"" + script_name + "\" 2>/dev/null";
-        system(kill_cmd.c_str());
+        { int r = system(kill_cmd.c_str()); (void)r; }
         // Longer wait for bezel script so BLE stack releases connections
         if (script_name.find("bezel") != std::string::npos)
-            system("sleep 2");
+            { int r = system("sleep 2"); (void)r; }
         else
-            system("sleep 0.5");
-        system(kill_cmd.c_str());
+            { int r = system("sleep 0.5"); (void)r; }
+        { int r = system(kill_cmd.c_str()); (void)r; }
     }
 
     // Check script exists
@@ -116,6 +116,22 @@ bool RelayManager::isRunning() const {
     return m_handle.isValid() && Platform::isProcessAlive(m_handle);
 }
 
+void RelayManager::restart_with_args(const std::string& args) {
+    stop();
+    m_extra_args = args;
+    start();
+}
+
+void RelayManager::restart_scan() {
+    // Launch bezel script in scan mode — outputs BEZEL_FOUND:MAC:NAME lines
+    // Script exits after scan — this is expected, not an error
+    stop();
+    std::string old_extra = m_extra_args;
+    m_extra_args = "--scan --plugin-ip 127.0.0.1";
+    start();
+    m_extra_args = old_extra;
+}
+
 void RelayManager::restart(uint16_t pfd_port, uint16_t mfd_port) {
     stop();
     m_pfd_port = pfd_port;
@@ -131,10 +147,13 @@ void RelayManager::monitorThread() {
 
         if (chunk.empty()) {
             if (m_handle.isValid() && !Platform::isProcessAlive(m_handle)) {
-                // Only report as unexpected if we didn't initiate the stop
                 if (m_monitor_running) {
-                    addLog("Relay process exited unexpectedly.", true);
-                    XPLMDebugString("[X1000] Relay process exited unexpectedly.\n");
+                    // Only flag as unexpected if not a scan (scan exits normally)
+                    bool is_scan = (m_extra_args.find("--scan") != std::string::npos);
+                    if (!is_scan) {
+                        addLog("Relay process exited unexpectedly.", true);
+                        XPLMDebugString("[X1000] Relay process exited unexpectedly.\n");
+                    }
                 }
                 break;
             }

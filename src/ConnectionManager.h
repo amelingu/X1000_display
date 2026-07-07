@@ -35,6 +35,7 @@ public:
     bool init();
     void poll();           // drain receive buffer — call every frame
     void tickUKP();         // fires held-button repeats
+    BezelSide lastUKPSide() const { return m_last_ukp_side; }
     void tickBacklights(); // send backlight updates — call every frame (rate-limited internally)
     void shutdown();
 
@@ -54,8 +55,10 @@ private:
 
     UDPSocket      m_pfd_recv_sock;  // bound to :15683 — PFD bezel UKP
     UDPSocket      m_mfd_recv_sock;  // bound to :15685 — MFD bezel UKP
+    std::string    m_last_ukp_ip;    // IP of last UKP sender (for scan activity)
     UDPSocket      m_send_sock;      // unbound, used for all outbound messages
     UKPHandler     m_ukp;
+    BezelSide      m_last_ukp_side = BezelSide::PFD;
     BacklightManager m_backlight;
 
     iPadEndpoint m_pfd_ep;

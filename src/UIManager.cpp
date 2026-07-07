@@ -1,6 +1,7 @@
 // UIManager.cpp — In-sim settings window using XPLMDisplay modern window API
 
 #include "UIManager.h"
+#include "Platform.h"
 #include <XPLMUtilities.h>
 #include <XPLMGraphics.h>
 #include <XPLMDisplay.h>
@@ -32,6 +33,9 @@ enum class ClickAction {
     CHECKBOX_AUTOSTART,
     FIELD_PFD_MAC,
     FIELD_MFD_MAC,
+    BEZEL_SCAN,
+    BEZEL_ASSIGN_PFD,
+    BEZEL_ASSIGN_MFD,
 };
 
 struct HitRect {
@@ -53,6 +57,7 @@ UIManager::UIManager() {}
 UIManager::~UIManager() {
     if (m_window) { XPLMDestroyWindow(m_window); m_window = nullptr; }
     if (m_menu)   { XPLMDestroyMenu(m_menu);     m_menu   = nullptr; }
+    if (m_menu_item >= 0) { XPLMRemoveMenuItem(XPLMFindPluginsMenu(), m_menu_item); m_menu_item = -1; }
 }
 
 // ---------------------------------------------------------------------------
@@ -103,17 +108,16 @@ void UIManager::init(SettingsManager* settings,
     XPLMSetWindowResizingLimits(m_window, WIN_W, WIN_H, WIN_W, WIN_H);
     XPLMSetWindowPositioningMode(m_window, xplm_WindowPositionFree, -1);
 
+    m_menu_item = XPLMAppendMenuItem(XPLMFindPluginsMenu(), "X1000 Display", nullptr, 1);
     m_menu = XPLMCreateMenu("X1000 Display", XPLMFindPluginsMenu(),
-                            XPLMAppendMenuItem(XPLMFindPluginsMenu(),
-                                               "X1000 Display", nullptr, 1),
-                            menuCB, this);
+                            m_menu_item, menuCB, this);
     XPLMAppendMenuItem(m_menu, "Settings", (void*)this, 1);
 }
 
 // ---------------------------------------------------------------------------
 
-void UIManager::show()   { if (m_window) XPLMSetWindowIsVisible(m_window, 1); m_settings->get().window_visible = true;  m_settings->save(); }
-void UIManager::hide()   { if (m_window) XPLMSetWindowIsVisible(m_window, 0); m_settings->get().window_visible = false; m_settings->save(); }
+void UIManager::show()   { if (m_window) XPLMSetWindowIsVisible(m_window, 1); m_settings->get().window_visible = true; }
+void UIManager::hide()   { if (m_window) XPLMSetWindowIsVisible(m_window, 0); m_settings->get().window_visible = false; }
 void UIManager::toggle() { if (isVisible()) hide(); else show(); }
 bool UIManager::isVisible() const { return m_window && XPLMGetWindowIsVisible(m_window); }
 
@@ -121,6 +125,7 @@ void UIManager::tick(bool pfd_s, bool mfd_s, int pf, int mf, int pk, int mk) {
     m_pfd_streaming = pfd_s; m_mfd_streaming = mfd_s;
     m_pfd_fps = pf; m_mfd_fps = mf;
     m_pfd_kb  = pk; m_mfd_kb  = mk;
+    if (m_scan_state == ScanState::SCANNING) pollBezelScan();
 }
 
 void UIManager::menuCB(void*, void* item_ref) {
@@ -355,6 +360,37 @@ void UIManager::drawNetwork(int& y, int left, int right) {
                   m_active_field == 7, ClickAction::FIELD_MFD_MAC);
     y -= 24;
 
+    // Bezel scan
+    drawButton(x, y-18, 80, 18, "Scan BLE",
+               ClickAction::BEZEL_SCAN, 0.15f, 0.25f, 0.35f);
+    if (m_scan_state == ScanState::SCANNING) {
+        drawText(x+90, y-14, "Scanning... press 3 buttons on PFD bezel!", 0.8f, 0.8f, 0.2f);
+    } else if (m_scan_state == ScanState::DONE) {
+        if (m_scan_found.empty()) {
+            drawText(x+90, y-14, "No bezels found.", 1.0f, 0.4f, 0.4f);
+        } else {
+            int dy = y - 14;
+            for (int i = 0; i < (int)m_scan_found.size() && i < 4; ++i) {
+                char lb[64];
+                snprintf(lb, sizeof(lb), "%d: %s", i+1, m_scan_found[i].c_str());
+                drawText(x+90, dy, lb, 0.2f, 1.0f, 0.2f);
+                // Highlight if this is the auto-detected PFD
+                bool is_pfd = (m_scan_found[i] == m_settings->get().pfd_bezel_mac);
+                bool is_mfd = (m_scan_found[i] == m_settings->get().mfd_bezel_mac);
+                if (is_pfd) drawText(x+88+205, dy, " ← PFD", 0.4f, 1.0f, 0.4f);
+                if (is_mfd) drawText(x+88+205, dy, " ← MFD", 0.4f, 0.8f, 1.0f);
+                drawButton(x+295, dy-4, 45, 16, "PFD",
+                           ClickAction::BEZEL_ASSIGN_PFD, 0.1f, 0.3f, 0.1f);
+                s_hit_rects.back().field_id = i;
+                drawButton(x+345, dy-4, 45, 16, "MFD",
+                           ClickAction::BEZEL_ASSIGN_MFD, 0.1f, 0.1f, 0.3f);
+                s_hit_rects.back().field_id = i;
+                dy -= 20;
+            }
+        }
+    }
+    y -= 28;
+
     // Autostart checkbox
     Settings& s = m_settings->get();
     drawCheckbox(x, y, "Auto-start when G1000 detected", s.autostart,
@@ -440,6 +476,109 @@ void UIManager::drawAbout(int& y, int left, int right) {
 }
 
 // ---------------------------------------------------------------------------
+// Bezel scan
+// ---------------------------------------------------------------------------
+
+void UIManager::notifyScanActivity(const std::string& mac) {
+    m_scan_active_mac  = mac;
+    m_scan_active_time = Platform::now_seconds();
+}
+
+void UIManager::startBezelScan() {
+    m_scan_state   = ScanState::SCANNING;
+    m_scan_found.clear();
+    m_scan_pfd_mac.clear();
+
+    if (!m_bezel_relay) return;
+
+    // Stop current bezel relay, restart with --scan flag
+    m_bezel_relay->stop();
+    m_bezel_relay->clearLog();
+    m_bezel_relay->restart_scan();
+
+    XPLMDebugString("[X1000] UI: Bezel scan started\n");
+}
+
+void UIManager::pollBezelScan() {
+    if (m_scan_state != ScanState::SCANNING || !m_bezel_relay) return;
+
+    auto log = m_bezel_relay->getLog();
+    bool done = false;
+
+    // Debug — log all entries once
+    static int s_last_log_size = 0;
+    if ((int)log.size() > s_last_log_size) {
+        for (int i = s_last_log_size; i < (int)log.size(); ++i) {
+            std::string msg = "[X1000] SCAN-LOG: " + log[i].text + "\n";
+            XPLMDebugString(msg.c_str());
+        }
+        s_last_log_size = (int)log.size();
+    }
+
+    for (const auto& entry : log) {
+        auto pos = entry.text.find("BEZEL_FOUND:");
+        if (pos != std::string::npos) {
+            std::string rest = entry.text.substr(pos + 12);
+            // Format: MAC:NAME where MAC itself contains colons
+            // MAC is 17 chars (XX:XX:XX:XX:XX:XX), so split at position 17
+            if (rest.size() >= 17) {
+                std::string mac = rest.substr(0, 17);
+                if (mac.size() == 17 && mac[2] == ':') {  // basic MAC validation
+                    bool dup = false;
+                    for (const auto& m : m_scan_found) if (m == mac) { dup = true; break; }
+                    if (!dup) m_scan_found.push_back(mac);
+                }
+            }
+        }
+        // BEZEL_PFD:MAC — user pressed a button on this bezel during scan
+        auto pos2 = entry.text.find("BEZEL_PFD:");
+        if (pos2 != std::string::npos) {
+            std::string rest = entry.text.substr(pos2 + 10);
+            if (rest.size() >= 17 && rest[2] == ':') {
+                m_scan_pfd_mac = rest.substr(0, 17);
+            }
+        }
+        if (entry.text.find("BEZEL_SCAN_DONE") != std::string::npos) {
+            done = true;
+        }
+    }
+
+    if (done) {
+        m_scan_state = ScanState::DONE;
+        char dbuf[128];
+        snprintf(dbuf, sizeof(dbuf), "[X1000] UI: Bezel scan complete — found %zu bezels\n",
+                 m_scan_found.size());
+        XPLMDebugString(dbuf);
+        for (const auto& mac : m_scan_found) {
+            std::string msg = "[X1000] UI: Found bezel MAC: " + mac + "\n";
+            XPLMDebugString(msg.c_str());
+        }
+        // Auto-assign if user pressed a button on the PFD bezel during scan
+        if (!m_scan_pfd_mac.empty() && m_scan_found.size() >= 1) {
+            strncpy(m_buf_pfd_mac, m_scan_pfd_mac.c_str(), sizeof(m_buf_pfd_mac)-1);
+            m_settings->get().pfd_bezel_mac = m_scan_pfd_mac;
+            XPLMDebugString("[X1000] UI: PFD bezel auto-assigned from scan\n");
+            std::string mfd_mac;
+            // If only 2 bezels found, auto-assign the other as MFD
+            if (m_scan_found.size() == 2) {
+                mfd_mac = (m_scan_found[0] == m_scan_pfd_mac)
+                           ? m_scan_found[1] : m_scan_found[0];
+                strncpy(m_buf_mfd_mac, mfd_mac.c_str(), sizeof(m_buf_mfd_mac)-1);
+                m_settings->get().mfd_bezel_mac = mfd_mac;
+                XPLMDebugString("[X1000] UI: MFD bezel auto-assigned from scan\n");
+            }
+            m_settings->save();
+
+            // Restart bezel relay with new MACs — no need to stop/restart plugin
+            if (m_bezel_relay && m_on_apply) {
+                XPLMDebugString("[X1000] UI: Restarting bezel relay with new MACs\n");
+                m_on_apply();  // triggers applySettings in Plugin.cpp which restarts relay
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Click handling — uses s_hit_rects registered during draw()
 // ---------------------------------------------------------------------------
 
@@ -494,6 +633,29 @@ void UIManager::handleClick(int mx, int my) {
         case ClickAction::FIELD_PC_IP:    m_active_field = 5; XPLMTakeKeyboardFocus(m_window); break;
         case ClickAction::FIELD_PFD_MAC:  m_active_field = 6; XPLMTakeKeyboardFocus(m_window); break;
         case ClickAction::FIELD_MFD_MAC:  m_active_field = 7; XPLMTakeKeyboardFocus(m_window); break;
+
+        case ClickAction::BEZEL_SCAN:
+            if (m_scan_state != ScanState::SCANNING)
+                startBezelScan();
+            break;
+
+        case ClickAction::BEZEL_ASSIGN_PFD:
+            if (hr.field_id >= 0 && hr.field_id < (int)m_scan_found.size()) {
+                const std::string& mac = m_scan_found[hr.field_id];
+                strncpy(m_buf_pfd_mac, mac.c_str(), sizeof(m_buf_pfd_mac)-1);
+                m_settings->get().pfd_bezel_mac = mac;
+                m_settings->save();
+            }
+            break;
+
+        case ClickAction::BEZEL_ASSIGN_MFD:
+            if (hr.field_id >= 0 && hr.field_id < (int)m_scan_found.size()) {
+                const std::string& mac = m_scan_found[hr.field_id];
+                strncpy(m_buf_mfd_mac, mac.c_str(), sizeof(m_buf_mfd_mac)-1);
+                m_settings->get().mfd_bezel_mac = mac;
+                m_settings->save();
+            }
+            break;
 
         case ClickAction::CHECKBOX_AUTOSTART:
             m_settings->get().autostart = !m_settings->get().autostart;

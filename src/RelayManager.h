@@ -29,6 +29,8 @@ public:
     bool isRunning() const;
 
     void restart(uint16_t pfd_port, uint16_t mfd_port);
+    void restart_scan();         // restart in scan mode, output BEZEL_FOUND: lines
+    void restart_with_args(const std::string& args);  // restart with new extra args
 
     std::vector<RelayLogEntry> getLog();
     void clearLog();

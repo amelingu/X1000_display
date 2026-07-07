@@ -57,8 +57,9 @@ DEFAULT_PFD_PORT    = 15683   # plugin listens for PFD UKP on this port
 DEFAULT_MFD_PORT    = 15685   # plugin listens for MFD UKP on this port
                                # (15684 is reserved for backlight output)
 
-# Device name prefix to auto-detect bezels
-BEZEL_NAME_PREFIX = "SHB1000"
+# Device name filter to auto-detect Simionic bezels
+# "1000" matches SHB1000, SHB1000S, SH1000M and future variants
+BEZEL_NAME_FILTER = "1000"
 
 # ---------------------------------------------------------------------------
 # UDP sender
@@ -157,7 +158,7 @@ async def scan_bezels(timeout: float = 10.0) -> list:
     bezels = []
     for d in devices:
         name = d.name or ""
-        if BEZEL_NAME_PREFIX in name:
+        if BEZEL_NAME_FILTER in name:
             bezels.append((d.address, name))
             log.info(f"  Found: {name} — {d.address}")
     if not bezels:
@@ -172,9 +173,73 @@ async def main(args):
     pfd_sender = UDPSender(args.plugin_ip, args.pfd_port, "PFD")
     mfd_sender = UDPSender(args.plugin_ip, args.mfd_port, "MFD")
 
-    # Scan mode
+    # Scan mode — discover bezels and listen for button presses to identify PFD
     if args.scan:
-        await scan_bezels(timeout=15.0)
+        log.info("Scanning for bezels and listening for button presses...")
+        log.info("Turn a knob or press buttons on your PFD bezel now...")
+
+        found_bezels = []
+        active_mac   = None  # MAC that sent a button press during scan
+
+        # Callback for button press during scan
+        press_counts = {}  # mac -> count of presses after ready_time
+
+        def make_scan_notify(mac, ready_time):
+            def on_notify(handle, data):
+                nonlocal active_mac
+                import time
+                if active_mac is not None:
+                    return
+                if time.time() <= ready_time:
+                    return  # ignore spurious notifications on connect
+                press_counts[mac] = press_counts.get(mac, 0) + 1
+                count = press_counts[mac]
+                log.info(f"Button press on {mac} ({count}/3)")
+                if count >= 3:
+                    active_mac = mac
+                    log.info(f"PFD confirmed: {mac}")
+                    print(f"BEZEL_ACTIVE:{mac}", flush=True)
+            return on_notify
+
+        # Scan for devices
+        devices = await BleakScanner.discover(timeout=5.0)
+        for d in devices:
+            name = d.name or ""
+            if BEZEL_NAME_FILTER in name:
+                found_bezels.append((d.address, name))
+
+        # Connect to all found bezels and subscribe during remaining scan time
+        clients = []
+        for mac, name in found_bezels:
+            try:
+                c = BleakClient(mac)
+                await c.connect()
+                import time
+                ready_time = time.time() + 1.0  # ignore first 1s of notifications
+                await c.start_notify(BEZEL_CHAR_UUID, make_scan_notify(mac, ready_time))
+                clients.append(c)
+                log.info(f"Listening on {name} — {mac}")
+            except Exception as e:
+                log.warning(f"Could not connect to {mac}: {e}")
+
+        # Listen for button presses for remaining time
+        await asyncio.sleep(10.0)
+
+        # Disconnect all
+        for c in clients:
+            try:
+                await c.stop_notify(BEZEL_CHAR_UUID)
+                await c.disconnect()
+            except Exception:
+                pass
+
+        # Output results
+        for mac, name in found_bezels:
+            print(f"BEZEL_FOUND:{mac}:{name}", flush=True)
+        if active_mac:
+            print(f"BEZEL_PFD:{active_mac}", flush=True)
+        print("BEZEL_SCAN_DONE", flush=True)
+        sys.stdout.flush()
         pfd_sender.close()
         mfd_sender.close()
         return

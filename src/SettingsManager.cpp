@@ -21,7 +21,9 @@ void SettingsManager::init(const std::string& plugin_dir) {
 }
 
 std::string SettingsManager::iniPath() const {
-    return m_plugin_dir + "/X1000_display.ini";
+    // Store ini at plugin root (one level up from lin_x64/win_x64/mac_x64/)
+    // so the same ini is shared across all platforms on the same machine.
+    return Platform::normalisePath(m_plugin_dir + "/../X1000_display.ini");
 }
 
 // ---------------------------------------------------------------------------

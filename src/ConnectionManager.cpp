@@ -54,10 +54,14 @@ bool ConnectionManager::init() {
 void ConnectionManager::poll() {
     std::string msg, sender_ip;
     uint16_t    sender_port;
-    while (m_pfd_recv_sock.recv(msg, sender_ip, sender_port))
+    while (m_pfd_recv_sock.recv(msg, sender_ip, sender_port)) {
+        m_last_ukp_side = BezelSide::PFD;
         handlePacket(msg, sender_ip, sender_port, BezelSide::PFD);
-    while (m_mfd_recv_sock.recv(msg, sender_ip, sender_port))
+    }
+    while (m_mfd_recv_sock.recv(msg, sender_ip, sender_port)) {
+        m_last_ukp_side = BezelSide::MFD;
         handlePacket(msg, sender_ip, sender_port, BezelSide::MFD);
+    }
 }
 
 void ConnectionManager::tickUKP() {

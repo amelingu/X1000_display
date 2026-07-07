@@ -18,6 +18,7 @@ public:
               RelayManager* bezel_relay, ApplyCallback on_apply);
     void show(); void hide(); void toggle();
     bool isVisible() const;
+    void notifyScanActivity(const std::string& mac);
     void tick(bool pfd_streaming, bool mfd_streaming,
               int pfd_fps, int mfd_fps, int pfd_kb, int mfd_kb);
 
@@ -47,6 +48,8 @@ private:
                       ClickAction action);
 
     void handleClick(int x, int y);
+    void startBezelScan();
+    void pollBezelScan();
 
     SettingsManager* m_settings = nullptr;
     RelayManager*    m_relay        = nullptr;
@@ -55,6 +58,7 @@ private:
 
     XPLMWindowID m_window   = nullptr;
     XPLMMenuID   m_menu     = nullptr;
+    int          m_menu_item = -1;
 
     static constexpr int WIN_W = 490;
     static constexpr int WIN_H = 600;
@@ -75,4 +79,13 @@ private:
 
     int  m_log_scroll       = 0;
     bool m_show_log         = false;
+    Platform::ProcessHandle m_scan_proc;
+
+    // Bezel scan state
+    enum class ScanState { IDLE, SCANNING, DONE };
+    ScanState                m_scan_state  = ScanState::IDLE;
+    std::vector<std::string> m_scan_found;   // all found MACs
+    std::string              m_scan_pfd_mac;   // auto-detected PFD MAC
+    std::string              m_scan_active_mac;
+    double                   m_scan_active_time = 0.0;
 };

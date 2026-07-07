@@ -3,9 +3,65 @@
 // PFD side  → g1000n1_* commands  (autopilot, NAV, COM, FMS, audio panel)
 // MFD side  → g1000n3_* commands  (MFD softkeys, FMS, range)
 //
-// Audio panel UKP values (148/149, 146/147 AUDIO VOL and panel buttons)
-// are mapped to sim/cockpit2/radios/* datarefs where X-Plane has no
-// direct command — those are marked TODO for dataref-write path.
+// ==========================================================================
+//
+// --- Debug logging ---
+//
+// KNOB_DEBUG_LOG
+//   Set to 1 to log every heading/course knob event with elapsed time.
+//   Each line shows: UKP value, direction, elapsed ms since last click.
+//   Lines ending with * indicate fast-spin mode was triggered.
+//   Set to 0 to disable (no performance impact when disabled).
+#define KNOB_DEBUG_LOG      0
+//
+// ==========================================================================
+// TUNING PARAMETERS — adjust these to customise bezel feel
+// ==========================================================================
+//
+// --- Heading / Course knob ---
+//
+// KNOB_NOISE_MS (seconds)
+//   Direction noise filter. Opposite-direction clicks arriving within this
+//   window are ignored as mechanical noise from fast spinning.
+//   Too high: intentional slow direction changes feel sluggish.
+//   Too low:  spurious reversals get through during fast spin.
+//   Recommended range: 0.06 – 0.15
+#define KNOB_NOISE_MS       0.01
+//
+// KNOB_FAST_THRESHOLD (seconds)
+//   Two consecutive same-direction clicks faster than this trigger fast-spin
+//   mode (KNOB_FAST_REPEAT commands per click instead of 1).
+//   Too high: fast spin triggers at slow speed (may feel jumpy).
+//   Too low:  requires very fast spin to trigger (bug moves slowly).
+//   Must be <= KNOB_NOISE_MS to avoid filtering valid fast clicks.
+//   Recommended range: 0.06 – 0.15
+#define KNOB_FAST_THRESHOLD 0.15
+//
+// KNOB_FAST_REPEAT (integer)
+//   Number of X-Plane commands fired per click in fast-spin mode.
+//   Higher = bug moves faster when spinning quickly.
+//   Recommended range: 5 – 15
+#define KNOB_FAST_REPEAT    10
+//
+// --- Hold-repeat keys (NOSE UP/DOWN, FMS cursor) ---
+//
+// HOLD_DELAY_S (seconds)
+//   How long a key must be held before auto-repeat starts.
+//   Recommended range: 0.3 – 0.8
+#define HOLD_DELAY_S        0.5
+//
+// HOLD_RATE_S (seconds between repeats)
+//   Initial repeat rate (1 / HOLD_RATE_S = commands per second).
+//   0.2 = 5/sec. Only applies to NOSE UP/DOWN (cursor keys accelerate).
+//   Recommended range: 0.1 – 0.3
+#define HOLD_RATE_S         0.2
+//
+// --- Cursor key acceleration ---
+//   Cursor keys start at HOLD_RATE_S and accelerate over time.
+//   Tiers: 0-1s held → 5/sec, 1-2s → 10/sec, 2-3s → 15/sec, 3s+ → 20/sec
+//   These are currently hardcoded in UKPHandler::tick() rates[] array.
+//
+// ==========================================================================
 
 #include "UKPHandler.h"
 #include "Platform.h"
@@ -222,7 +278,7 @@ void UKPHandler::init() {
 struct KnobFilter {
     double last_time  = 0.0;
     bool   last_cw    = true;
-    double noise_ms   = 0.12;  // ignore reversals within 120ms
+    double noise_ms   = KNOB_NOISE_MS;
 };
 
 static void tickKnob(KnobFilter& k, bool cw,
@@ -232,16 +288,35 @@ static void tickKnob(KnobFilter& k, bool cw,
 
     // Ignore direction reversal if it arrives too quickly after last click
     if (dt < k.noise_ms && cw != k.last_cw) {
+#if KNOB_DEBUG_LOG
+        char dbuf[80];
+        snprintf(dbuf, sizeof(dbuf),
+                 "[X1000] KNOB: UKP=%s dt=%.1fms filtered\n",
+                 cw ? "CW " : "CCW", dt * 1000.0);
+        XPLMDebugString(dbuf);
+#endif
         return;  // noise — skip
     }
 
     // Detect fast spin: clicks arriving faster than 80ms = fast spin
     // Fire 5 commands per click when spinning fast, 1 when slow
-    bool fast = (dt < 0.08 && cw == k.last_cw);
-    int repeat = fast ? 10 : 1;
+    bool fast = (dt < KNOB_FAST_THRESHOLD && cw == k.last_cw);
+    int repeat = fast ? KNOB_FAST_REPEAT : 1;
 
     k.last_time = t;
     k.last_cw   = cw;
+
+#if KNOB_DEBUG_LOG
+    {
+        char dbuf[80];
+        snprintf(dbuf, sizeof(dbuf),
+                 "[X1000] KNOB: UKP=%s dt=%.1fms%s\n",
+                 cw ? "CW " : "CCW",
+                 dt * 1000.0,
+                 fast ? " *" : "");
+        XPLMDebugString(dbuf);
+    }
+#endif
 
     const char* cmd = cw ? cmd_up : cmd_dn;
     XPLMCommandRef ref = XPLMFindCommand(cmd);
@@ -257,13 +332,13 @@ static void tickKnob(KnobFilter& k, bool cw,
 
 static UKPHandler::HoldKey s_hold_keys[] = {
     // NOSE UP/DOWN — no acceleration needed, fixed 5/sec
-    { 56, 57, "sim/GPS/g1000n1_nose_up",   "sim/GPS/g1000n3_nose_up",   BezelSide::PFD, false, 0, 0, 0.5, 0.2 },
-    { 62, 63, "sim/GPS/g1000n1_nose_down", "sim/GPS/g1000n3_nose_down", BezelSide::PFD, false, 0, 0, 0.5, 0.2 },
+    { 56, 57, "sim/GPS/g1000n1_nose_up",   "sim/GPS/g1000n3_nose_up",   BezelSide::PFD, false, 0, 0, HOLD_DELAY_S, HOLD_RATE_S },
+    { 62, 63, "sim/GPS/g1000n1_nose_down", "sim/GPS/g1000n3_nose_down", BezelSide::PFD, false, 0, 0, HOLD_DELAY_S, HOLD_RATE_S },
     // CURSOR keys — with acceleration (starts 5/sec, +5/sec every second, cap 20/sec)
-    { 198, 199, "sim/GPS/g1000n1_pan_up",    "sim/GPS/g1000n3_pan_up",    BezelSide::PFD, false, 0, 0, 0.5, 0.2 },
-    { 200, 201, "sim/GPS/g1000n1_pan_down",  "sim/GPS/g1000n3_pan_down",  BezelSide::PFD, false, 0, 0, 0.5, 0.2 },
-    { 194, 195, "sim/GPS/g1000n1_pan_left",  "sim/GPS/g1000n3_pan_left",  BezelSide::PFD, false, 0, 0, 0.5, 0.2 },
-    { 196, 197, "sim/GPS/g1000n1_pan_right", "sim/GPS/g1000n3_pan_right", BezelSide::PFD, false, 0, 0, 0.5, 0.2 },
+    { 198, 199, "sim/GPS/g1000n1_pan_up",    "sim/GPS/g1000n3_pan_up",    BezelSide::PFD, false, 0, 0, HOLD_DELAY_S, HOLD_RATE_S },
+    { 200, 201, "sim/GPS/g1000n1_pan_down",  "sim/GPS/g1000n3_pan_down",  BezelSide::PFD, false, 0, 0, HOLD_DELAY_S, HOLD_RATE_S },
+    { 194, 195, "sim/GPS/g1000n1_pan_left",  "sim/GPS/g1000n3_pan_left",  BezelSide::PFD, false, 0, 0, HOLD_DELAY_S, HOLD_RATE_S },
+    { 196, 197, "sim/GPS/g1000n1_pan_right", "sim/GPS/g1000n3_pan_right", BezelSide::PFD, false, 0, 0, HOLD_DELAY_S, HOLD_RATE_S },
 };
 static constexpr int N_HOLD_KEYS = 6;
 // Cursor keys start at index 2 — these get acceleration

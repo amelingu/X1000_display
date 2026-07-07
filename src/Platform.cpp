@@ -356,7 +356,7 @@ bool Platform::loadGLBufferFunctions() {
 }
 
 char        Platform::pathSeparator()   { return '\\'; }
-std::string Platform::pythonExecutable() { return "python3.exe"; }
+std::string Platform::pythonExecutable() { return "python"; }
 
 std::string Platform::pathJoin(const std::string& a, const std::string& b) {
     if (a.empty()) return b;
@@ -366,9 +366,37 @@ std::string Platform::pathJoin(const std::string& a, const std::string& b) {
 }
 
 std::string Platform::normalisePath(const std::string& path) {
+    // Convert forward slashes to backslashes
     std::string r = path;
     for (char& c : r) if (c == '/') c = '\\';
-    return r;
+    // Resolve .. components
+    // e.g. "E:\plugins\win_x64\..\tools" -> "E:\plugins\tools"
+    std::string out;
+    std::vector<std::string> parts;
+    size_t i = 0;
+    // Handle drive letter prefix
+    std::string prefix;
+    if (r.size() >= 2 && r[1] == ':') {
+        prefix = r.substr(0, 2);
+        i = 2;
+    }
+    while (i <= r.size()) {
+        size_t sep = r.find('\\', i);
+        if (sep == std::string::npos) sep = r.size();
+        std::string part = r.substr(i, sep - i);
+        if (part == "..") {
+            if (!parts.empty()) parts.pop_back();
+        } else if (!part.empty() && part != ".") {
+            parts.push_back(part);
+        }
+        i = sep + 1;
+    }
+    out = prefix;
+    for (size_t j = 0; j < parts.size(); ++j) {
+        if (j > 0 || !prefix.empty()) out += '\\';
+        out += parts[j];
+    }
+    return out;
 }
 
 double Platform::now_seconds() {
