@@ -1,4 +1,11 @@
 // Plugin.cpp — X1000_display entry point
+//
+// Registers the plugin with X-Plane, manages the lifecycle of all subsystems:
+//   - SettingsManager  — persistent INI configuration
+//   - ConnectionManager — bezel UDP input, backlight output
+//   - RelayManager (x2) — display relay + bezel BLE bridge (Python processes)
+//   - DisplayStreamer   — G1000 PBO capture, JPEG encode, UDP push
+//   - UIManager        — in-sim floating settings window
 
 #include "Platform.h"
 #include "ConnectionManager.h"
@@ -7,7 +14,6 @@
 #include "SettingsManager.h"
 #include "RelayManager.h"
 #include "UIManager.h"
-
 #include <XPLMPlugin.h>
 #include <XPLMProcessing.h>
 #include <XPLMUtilities.h>
@@ -20,29 +26,31 @@ static SettingsManager*   g_settings    = nullptr;
 static RelayManager*      g_relay       = nullptr;   // display relay
 static RelayManager*      g_bezel_relay = nullptr;   // bezel BLE bridge
 static UIManager*         g_ui          = nullptr;
+static std::string        g_plugin_dir;
 
-static std::string g_plugin_dir;
-
-// Live stats for UI
+// Live stats passed to UI each frame
 static int  s_pfd_frame_count = 0, s_mfd_frame_count = 0;
 static int  s_pfd_fps = 0,         s_mfd_fps = 0;
 static int  s_pfd_kb  = 0,         s_mfd_kb  = 0;
 
-// Auto-retry display init until G1000 is bound
-static bool s_display_init_pending = false;
-static double s_last_retry_time    = 0.0;
+// Auto-retry display init until G1000 avionics are bound
+static bool   s_display_init_pending = false;
+static double s_last_retry_time      = 0.0;
 
+
+// ---------------------------------------------------------------------------
+// applySettings — called from UI when the user clicks Apply
 // ---------------------------------------------------------------------------
 
 static void applySettings() {
     const Settings& s = g_settings->get();
 
-    // Restart relay with new ports
+    // Restart display relay with potentially new ports
     if (g_relay) {
         g_relay->restart(s.relay_pfd_port, s.relay_mfd_port);
     }
 
-    // Restart bezel relay with (potentially new) MAC addresses
+    // Restart bezel relay with potentially new MAC addresses
     if (g_bezel_relay) {
         g_bezel_relay->stop();
         std::string bezel_args;
@@ -52,12 +60,13 @@ static void applySettings() {
         g_bezel_relay->restart_with_args(bezel_args);
     }
 
-    // Reinit display streamer with new quality settings
+    // Reinitialise display streamer with new quality/port settings
     if (g_display) {
         g_display->shutdown();
         delete g_display;
     }
     g_display = new DisplayStreamer();
+
     StreamConfig cfg;
     cfg.pfd_ip        = "127.0.0.1";
     cfg.mfd_ip        = "127.0.0.1";
@@ -73,6 +82,11 @@ static void applySettings() {
         g_display = nullptr;
     }
 }
+
+
+// ---------------------------------------------------------------------------
+// initDisplay — (re)create and initialise the DisplayStreamer
+// ---------------------------------------------------------------------------
 
 static void initDisplay() {
     if (g_display) { g_display->shutdown(); delete g_display; }
@@ -98,27 +112,36 @@ static void initDisplay() {
     }
 }
 
+
 // ---------------------------------------------------------------------------
-// Flight loop
+// Flight loop callback — called every frame by X-Plane
 // ---------------------------------------------------------------------------
 
 static float flightLoopCB(float /*elapsed*/, float /*flightLoop*/, int /*count*/, void*) {
-    if (g_conn)    g_conn->poll();
-    if (g_conn)    g_conn->tickUKP();
+
+    // Poll bezel UDP input and fire hold-repeat keys
+    if (g_conn) g_conn->poll();
+    if (g_conn) g_conn->tickUKP();
+
+    // Notify UI of bezel activity for scan highlighting
     if (g_ui && g_conn && g_settings) {
-        const Settings& s = g_settings->get();
-        BezelSide side = g_conn->lastUKPSide();
+        const Settings& s  = g_settings->get();
+        BezelSide side     = g_conn->lastUKPSide();
         const std::string& mac = (side == BezelSide::PFD)
                                   ? s.pfd_bezel_mac : s.mfd_bezel_mac;
         if (!mac.empty()) g_ui->notifyScanActivity(mac);
     }
-    if (g_conn)    g_conn->tickBacklights();
+
+    // Send backlight states to bezels
+    if (g_conn) g_conn->tickBacklights();
+
+    // Encode and push display frames
     if (g_display) g_display->tick();
 
     // Auto-retry display init if G1000 wasn't bound at startup
     if (s_display_init_pending && (!g_display || !g_display->isReady())) {
         double t = Platform::now_seconds();
-        if (t - s_last_retry_time >= 2.0) {  // retry every 2 seconds
+        if (t - s_last_retry_time >= 2.0) {
             s_last_retry_time = t;
             initDisplay();
             if (g_display && g_display->isReady()) {
@@ -129,10 +152,9 @@ static float flightLoopCB(float /*elapsed*/, float /*flightLoop*/, int /*count*/
     }
 
     // Update UI stats once per second
-    double t = 0;
     {
         static double last = 0;
-        t = Platform::now_seconds();
+        double t = Platform::now_seconds();
         if (t - last >= 1.0) {
             s_pfd_fps = s_pfd_frame_count;
             s_mfd_fps = s_mfd_frame_count;
@@ -148,11 +170,10 @@ static float flightLoopCB(float /*elapsed*/, float /*flightLoop*/, int /*count*/
                    s_pfd_kb,  s_mfd_kb);
 
         // Detect when user closes the window via the X button
-        // (XPLM has no close callback, so we poll)
+        // (XPLM has no close callback, so we poll visibility)
         static bool s_last_visible = false;
         bool now_visible = g_ui->isVisible();
         if (s_last_visible && !now_visible) {
-            // Window was just closed — save state
             g_settings->get().window_visible = false;
             g_settings->save();
         }
@@ -162,6 +183,7 @@ static float flightLoopCB(float /*elapsed*/, float /*flightLoop*/, int /*count*/
     return -1.0f;
 }
 
+
 // ---------------------------------------------------------------------------
 // XPluginStart
 // ---------------------------------------------------------------------------
@@ -170,12 +192,19 @@ PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
     strncpy(outName, "X1000 Display Mirror",                                   255);
     strncpy(outSig,  "com.x1000.display",                                      255);
     strncpy(outDesc, "G1000 PFD/MFD mirror to iPads; bezel input; auto relay", 255);
+
     XPLMDebugString("[X1000] XPluginStart\n");
 
-    // Get plugin directory
-    char path[512]; XPLMGetPluginInfo(XPLMGetMyID(), nullptr, path, nullptr, nullptr);
+    // Determine plugin directory from the full path to this .xpl file.
+    // Handle both forward slashes (Linux/Mac) and backslashes (Windows).
+    char path[512];
+    XPLMGetPluginInfo(XPLMGetMyID(), nullptr, path, nullptr, nullptr);
     std::string full(path);
-    auto slash = full.rfind('/');
+    auto slash  = full.rfind('/');
+    auto bslash = full.rfind('\\');
+    if (bslash != std::string::npos &&
+        (slash == std::string::npos || bslash > slash))
+        slash = bslash;
     g_plugin_dir = (slash != std::string::npos) ? full.substr(0, slash) : full;
 
     return 1;
@@ -184,6 +213,7 @@ PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
 PLUGIN_API void XPluginStop() {
     XPLMDebugString("[X1000] XPluginStop\n");
 }
+
 
 // ---------------------------------------------------------------------------
 // XPluginEnable
@@ -196,33 +226,32 @@ PLUGIN_API int XPluginEnable() {
     g_settings = new SettingsManager();
     g_settings->init(g_plugin_dir);
 
-    // Connection (bezel input)
+    // Bezel UDP input / backlight output
     g_conn = new ConnectionManager();
     if (!g_conn->init()) {
         XPLMDebugString("[X1000] ConnectionManager init failed\n");
         delete g_conn; g_conn = nullptr;
     }
 
-    // Relay — script lives at:
-    //   <XP12>/Resources/plugins/X1000_display/tools/x1000_relay.py
-    // g_plugin_dir is .../X1000_display/lin_x64 so go up one level
+    // Display relay — x1000_relay.py lives one level up from the platform binary
+    // e.g. .../X1000_display/lin_x64/../tools/x1000_relay.py
     g_relay = new RelayManager();
-    std::string relay_path = Platform::normalisePath(g_plugin_dir + "/../tools/x1000_relay.py");
+    std::string relay_path = Platform::normalisePath(
+        g_plugin_dir + "/../tools/x1000_relay.py");
     g_relay->init(relay_path,
                   g_settings->get().relay_pfd_port,
                   g_settings->get().relay_mfd_port);
     g_relay->start();
 
-    // Bezel BLE bridge
+    // Bezel BLE bridge — x1000_bezel.py, same tools folder
     g_bezel_relay = new RelayManager();
     {
-        std::string bezel_path = Platform::normalisePath(g_plugin_dir + "/../tools/x1000_bezel.py");
+        std::string bezel_path = Platform::normalisePath(
+            g_plugin_dir + "/../tools/x1000_bezel.py");
         const Settings& bs = g_settings->get();
         std::string bezel_args;
-        if (!bs.pfd_bezel_mac.empty())
-            bezel_args += "--pfd " + bs.pfd_bezel_mac + " ";
-        if (!bs.mfd_bezel_mac.empty())
-            bezel_args += "--mfd " + bs.mfd_bezel_mac + " ";
+        if (!bs.pfd_bezel_mac.empty()) bezel_args += "--pfd " + bs.pfd_bezel_mac + " ";
+        if (!bs.mfd_bezel_mac.empty()) bezel_args += "--mfd " + bs.mfd_bezel_mac + " ";
         bezel_args += "--plugin-ip 127.0.0.1";
 
         g_bezel_relay->init(bezel_path,
@@ -231,8 +260,10 @@ PLUGIN_API int XPluginEnable() {
                             bezel_args);
 
         if (!bs.pfd_bezel_mac.empty() || !bs.mfd_bezel_mac.empty()) {
+#if !defined(_WIN32)
+            // On Linux/Mac: force BlueZ to release any stale BLE connection
+            // before launching bleak, so bezels are discoverable again.
             XPLMDebugString("[X1000] Bezel: disconnecting any existing BLE connections...\n");
-            // Force BlueZ to disconnect from bezels so bleak can reconnect cleanly
             if (!bs.pfd_bezel_mac.empty()) {
                 std::string cmd = "bluetoothctl disconnect " + bs.pfd_bezel_mac + " 2>/dev/null";
                 { int r = system(cmd.c_str()); (void)r; }
@@ -242,6 +273,12 @@ PLUGIN_API int XPluginEnable() {
                 { int r = system(cmd.c_str()); (void)r; }
             }
             { int r = system("sleep 1"); (void)r; }
+#else
+            // On Windows: the Windows BLE stack manages connections differently.
+            // bleak handles reconnection internally — no explicit disconnect needed.
+            XPLMDebugString("[X1000] Bezel: starting BLE bridge (Windows)...\n");
+            Platform::sleep_ms(500);
+#endif
             XPLMDebugString("[X1000] Bezel: starting BLE bridge...\n");
             g_bezel_relay->start();
         } else {
@@ -249,15 +286,14 @@ PLUGIN_API int XPluginEnable() {
         }
     }
 
-    // UI — window visibility driven purely by saved setting, no extra save here
+    // In-sim settings UI
     g_ui = new UIManager();
     g_ui->init(g_settings, g_relay, g_bezel_relay, applySettings);
-    // Only show if explicitly saved as visible (default is false)
     if (g_settings->get().window_visible) {
         g_ui->show();
     }
 
-    // Display streamer
+    // Display streamer — may fail if G1000 isn't bound yet; flight loop retries
     initDisplay();
 
     XPLMRegisterFlightLoopCallback(flightLoopCB, -1.0f, nullptr);
@@ -265,21 +301,24 @@ PLUGIN_API int XPluginEnable() {
     return 1;
 }
 
+
 // ---------------------------------------------------------------------------
 // XPluginDisable
 // ---------------------------------------------------------------------------
 
 PLUGIN_API void XPluginDisable() {
     XPLMDebugString("[X1000] XPluginDisable\n");
+
     XPLMUnregisterFlightLoopCallback(flightLoopCB, nullptr);
 
-    if (g_ui)          { delete g_ui;             g_ui          = nullptr; }
+    if (g_ui)          { delete g_ui;                                 g_ui          = nullptr; }
     if (g_bezel_relay) { g_bezel_relay->stop(); delete g_bezel_relay; g_bezel_relay = nullptr; }
     if (g_relay)       { g_relay->stop();       delete g_relay;       g_relay       = nullptr; }
-    if (g_display) { g_display->shutdown(); delete g_display; g_display = nullptr; }
-    if (g_conn)    { g_conn->shutdown(); delete g_conn; g_conn = nullptr; }
-    if (g_settings){ g_settings->save(); delete g_settings; g_settings = nullptr; }
+    if (g_display)     { g_display->shutdown(); delete g_display;     g_display     = nullptr; }
+    if (g_conn)        { g_conn->shutdown();    delete g_conn;        g_conn        = nullptr; }
+    if (g_settings)    { g_settings->save();    delete g_settings;    g_settings    = nullptr; }
 }
+
 
 // ---------------------------------------------------------------------------
 // XPluginReceiveMessage
@@ -288,12 +327,13 @@ PLUGIN_API void XPluginDisable() {
 PLUGIN_API void XPluginReceiveMessage(XPLMPluginID, int msg, void*) {
     if (msg == XPLM_MSG_PLANE_LOADED) {
         XPLMDebugString("[X1000] Aircraft loaded — queuing DisplayStreamer init\n");
-        // Don't init immediately — avionics take a moment to bind after plane load.
-        // Set pending flag so flight loop retries every 2 seconds.
-        s_display_init_pending = true;
-        s_last_retry_time = 0.0; // retry immediately on next flight loop tick
 
-        // Auto-start relay if needed
+        // Don't init immediately — avionics take a moment to bind after plane load.
+        // Set pending flag; flight loop retries every 2 seconds.
+        s_display_init_pending = true;
+        s_last_retry_time      = 0.0;
+
+        // Auto-start relay if it stopped (e.g. after a crash)
         if (g_settings && g_settings->get().autostart &&
             g_relay && !g_relay->isRunning()) {
             g_relay->start();

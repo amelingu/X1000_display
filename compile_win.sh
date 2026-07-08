@@ -47,7 +47,7 @@ make_import_lib() {
         # Try to use actual X-Plane DLL for perfect symbol extraction
         local xp_dll
         xp_dll=$(find_xplane_dll "$name")
-        local symbols
+        local symbols=""
 
         if [ -n "$xp_dll" ] && command -v gendef >/dev/null 2>&1; then
             echo "    (using gendef on $xp_dll)"
@@ -83,7 +83,7 @@ make_import_lib() {
             exit 1
         fi
 
-        local count
+        local count=""
         count=$(echo "$symbols" | wc -l)
         echo "    Found $count symbols"
 
