@@ -95,6 +95,16 @@ class BezelClient:
 
     async def connect(self):
         log.info(f"{self.name}: connecting to {self.mac}...")
+
+        # On Windows, pre-scan so bleak can discover the device by MAC
+        import sys
+        if sys.platform == 'win32':
+            log.info(f"{self.name}: pre-scanning for device (Windows)...")
+            try:
+                await BleakScanner.discover(timeout=5.0)
+            except Exception as e:
+                log.warning(f"{self.name}: pre-scan failed: {e}")
+
         # If already connected from a previous session, disconnect first
         try:
             if self.client.is_connected:
@@ -282,7 +292,8 @@ async def main(args):
     connected = [c for c in clients if c.is_connected]
     if not connected:
         log.error("No bezels connected.")
-        sender.close()
+        pfd_sender.close()
+        mfd_sender.close()
         return
 
     log.info(f"{len(connected)} bezel(s) connected. Press Ctrl+C to stop.")
