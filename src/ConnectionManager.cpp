@@ -69,8 +69,10 @@ void ConnectionManager::tickUKP() {
 }
 
 void ConnectionManager::tickBacklights() {
+    // LED state is sent to x1000_bezel.py which runs locally.
+    // It listens on 127.0.0.1:15684 and forwards to bezels via BLE.
     m_backlight.tick(m_send_sock,
-                     m_pfd_ep.ip, m_mfd_ep.ip,
+                     "127.0.0.1", "127.0.0.1",
                      SEND_PORT);
 }
 

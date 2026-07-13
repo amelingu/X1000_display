@@ -29,12 +29,18 @@ Designed for use with **Simionic SHB1000S** bezels and two iPads as screens, pro
 - **Display backup switch** — stable ON/OFF switch controlling `G1000_display_reversion`
 - **Auto BLE reconnect** — bezels reconnect automatically between X-Plane sessions
 
+### Bezel LED Control
+- **Backlight brightness** — PFD and MFD bezel backlights (and audio panel backlight) track X-Plane panel brightness in real time
+- **Audio panel button LEDs** — COM1/2 monitor, COM1/2 MIC, NAV1/2, ADF, DME, MKR/MUTE, SPKR LEDs reflect actual X-Plane audio selection state
+- **Protocol** — reverse-engineered via nRF52840 Wireshark capture: single-byte BLE writes to handle `0x0008` (0x01–0x40 = brightness, >0x40 = button LED UKP value)
+
 ### Plugin Infrastructure
 - **Auto relay launch** — display relay and bezel BLE bridge start/stop with the plugin
-- **In-sim UI** — floating settings window (Plugins → X1000 Display → Settings) with live status, bezel MAC configuration, setup guide
-- **Persistent settings** — saved to `X1000_display.ini` next to the plugin
+- **In-sim UI** — floating settings window (Plugins → X1000 Display → Settings) with live status, bezel MAC configuration, BLE scan with auto PFD detection
+- **Bezel scan** — click Scan BLE, press 3 buttons on PFD bezel → both bezels auto-assigned and connected without restart
+- **Persistent settings** — saved to `X1000_display.ini` at plugin root (shared across platforms)
 - **Auto-retry display init** — waits for G1000 avionics to bind after aircraft load
-- **Cross-platform** — Linux, Windows (MinGW cross-compile), macOS (universal binary)
+- **Cross-platform** — Linux ✅, Windows 10 ✅, macOS ⏳
 
 ---
 
@@ -50,19 +56,33 @@ X-Plane G1000 draw callback
 
 tools/x1000_bezel.py (bleak BLE, standalone process)   ← auto-launched by plugin
   → connects to SHB1000S bezel(s) via Bluetooth LE
-  → receives UKP byte notifications
-  → sends UKP packets → Plugin UDP :15683 (PFD) / :15685 (MFD)
-  → ConnectionManager → UKPHandler → XPLMCommandOnce
-  → AudioPanelManager → XPLMCommandOnce / XPLMSetDatai
+  INPUT:  BLE notifications → UKP bytes → UDP :15683 (PFD) / :15685 (MFD)
+          → ConnectionManager → UKPHandler → XPLMCommandOnce
+          → AudioPanelManager → XPLMCommandOnce / XPLMSetDatai
+  OUTPUT: UDP :15684 ← plugin binary LED state packet
+          → BLE write to handle 0x0008 (single byte: brightness or LED UKP)
+```
 
-Plugin → bezel :15684   (backlight protocol — currently ignored by SHB1000S firmware)
+**BLE LED protocol** (reverse-engineered via nRF52840 Wireshark capture, July 2026):
+
+| Value | Effect |
+|---|---|
+| `0x00` | Reset — all LEDs off, backlight off |
+| `0x01–0x40` | Backlight brightness (1=dim, 64=max) |
+| `>0x40` | Turn ON LED for button with that UKP release value |
+
+**Plugin → bezel script LED packet** (binary UDP on port 15684):
+```
+Byte 0:     brightness (0–64)
+Bytes 1..N: UKP release values for active button LEDs
 ```
 
 **Key design decisions:**
-- Bezel input is a separate Python process (`x1000_bezel.py`) for crash isolation
-- Display relay is pure Python stdlib — no pip dependencies
+- Bezel input/output handled by a separate Python process (`x1000_bezel.py`) for crash isolation
+- Display relay uses Python stdlib only — no pip dependencies
 - PBO double-buffering eliminates GPU readback stall
 - JPEG encode happens on a background thread — render thread cost is negligible
+- Single ini file at plugin root shared by all platform binaries
 
 ---
 
@@ -76,16 +96,16 @@ X1000_display/
 │   ├── DisplayStreamer.h/.cpp    G1000 capture, PBO, JPEG, brightness, UDP push
 │   ├── SettingsManager.h/.cpp    INI persistence, IP detection
 │   ├── RelayManager.h/.cpp       Relay process spawn and monitoring
-│   ├── UIManager.h/.cpp          In-sim floating settings window
+│   ├── UIManager.h/.cpp          In-sim floating settings window + BLE scan UI
 │   ├── ConnectionManager.h/.cpp  Bezel UDP input, backlight output
 │   ├── UKPHandler.h/.cpp         UKP → X-Plane command map (PFD + MFD + audio panel)
 │   ├── AudioPanelManager.h/.cpp  Audio panel button → X-Plane commands/datarefs
-│   ├── BacklightManager.h/.cpp   AP/audio datarefs → bezel LED states
+│   ├── BacklightManager.h/.cpp   Audio/brightness datarefs → binary LED state → UDP
 │   ├── UDPSocket.h/.cpp          Cross-platform non-blocking UDP
 │   └── stb_image_write.h         Single-header JPEG encoder
 ├── tools/
 │   ├── x1000_relay.py            Python WebSocket relay (stdlib only, no pip needed)
-│   └── x1000_bezel.py            BLE bezel bridge (requires: pip install bleak)
+│   └── x1000_bezel.py            BLE bezel bridge — input + LED output (requires bleak)
 ├── X1000Viewer/                  Native iOS app (Swift) — in progress
 ├── docs/
 │   └── bezel SHB1000S.txt        SHB1000S hardware reference notes
@@ -112,9 +132,10 @@ X1000_display/
 | Brightness sync from X-Plane | ✅ Working |
 | WebSocket relay → Safari | ✅ Working |
 | In-sim settings UI | ✅ Working |
-| Persistent settings | ✅ Working |
+| Persistent settings (shared ini) | ✅ Working |
+| Bezel scan with auto PFD detection | ✅ Working |
 | Linux build | ✅ Working |
-| Windows build | ✅ Compiles (untested at runtime) |
+| Windows 10 build and runtime | ✅ Working |
 | macOS build | ⏳ Script ready, needs a Mac |
 | PFD bezel input — all buttons/knobs | ✅ Working |
 | MFD bezel input — all buttons/knobs | ✅ Working |
@@ -124,7 +145,8 @@ X1000_display/
 | Cursor key acceleration | ✅ Working |
 | Display backup switch | ✅ Working |
 | Bezel auto-reconnect | ✅ Working |
-| Bezel/audio panel LED control | 🔧 Protocol unknown — needs Windows sniff |
+| Bezel/audio panel backlight control | ✅ Implemented (untested end-to-end) |
+| Audio panel button LED control | ✅ Implemented (untested end-to-end) |
 | X1000Viewer iOS app | 🔧 In progress |
 
 ---
@@ -133,12 +155,12 @@ X1000_display/
 
 | Component | Model | Notes |
 |---|---|---|
-| PFD bezel | Simionic SHB1000S (or later variants) | Bluetooth LE, audio panel attached |
-| MFD bezel | Simionic SHB1000S (or later variants) | Bluetooth LE |
+| PFD bezel | Simionic SHB1000S or later (SH1000M etc.) | Bluetooth LE, audio panel attached via EXT. PORT |
+| MFD bezel | Simionic SHB1000S or later | Bluetooth LE |
 | BLE adapter | Any USB BT5.0 dongle | e.g. TP-Link UB500 — built-in BT works too |
 | PFD display | iPad (any) | Safari or X1000Viewer |
 | MFD display | iPad (any) | Safari or X1000Viewer |
-| Sim PC | Ubuntu 24.04 | X-Plane 12 |
+| Sim PC | Ubuntu 24.04 or Windows 10 | X-Plane 12 |
 
 **BLE MAC addresses** (configure in plugin settings or ini):
 - PFD bezel: `00:07:80:A6:E1:71`
@@ -159,7 +181,7 @@ X1000_display/
 | Platform | Toolchain |
 |---|---|
 | Linux | `g++` (Ubuntu 24.04+) |
-| Windows | `x86_64-w64-mingw32-g++` — `sudo apt install mingw-w64` |
+| Windows | `x86_64-w64-mingw32-g++` — `sudo apt install mingw-w64` (cross-compile from Linux) |
 | macOS | `clang++` — `xcode-select --install` (must run on a Mac) |
 
 ---
@@ -245,9 +267,8 @@ tools/x1000_bezel.py              →  <XP12>/Resources/plugins/X1000_display/to
 **First run on Windows:**
 - Start X-Plane, load G1000 aircraft, pop out PFD and MFD windows
 - Open **Plugins → X1000 Display → Settings**
-- Click **[Scan BLE]** to find bezels automatically
-- Click **[Use]** next to each found bezel to assign PFD/MFD
-- Click **[Apply & Restart Stream]**
+- Click **[Scan BLE]**, press 3 buttons on the PFD bezel when prompted
+- Both bezels auto-assigned — plugin connects immediately
 
 ---
 
@@ -310,7 +331,17 @@ For a better experience (hidden status bar, true full screen) use the **X1000Vie
 
 ## Bezel Setup
 
-Configure MAC addresses in the plugin settings window or directly in the ini file:
+### First time (no ini file)
+
+1. Open **Plugins → X1000 Display → Settings**
+2. Click **[Scan BLE]** — the plugin scans for nearby bezels for 15 seconds
+3. When prompted, press 3 buttons on the **PFD bezel**
+4. Both bezels are automatically identified and assigned
+5. The bezel bridge restarts automatically — no further action needed
+
+### Manual configuration
+
+Edit `X1000_display.ini` at the plugin root:
 
 ```ini
 [bezel]
@@ -320,9 +351,7 @@ bezel_pfd_port=15683
 bezel_mfd_port=15685
 ```
 
-The bezel bridge starts automatically when the plugin loads. Both bezels reconnect automatically between X-Plane sessions.
-
-Install the bleak dependency once:
+Install bleak once:
 ```bash
 pip install bleak --break-system-packages
 ```
@@ -331,9 +360,36 @@ pip install bleak --break-system-packages
 
 ## Bezel LED Control
 
-The SHB1000S bezels have general adjustable backlights (no individual button LEDs on PFD/MFD bezels). The audio panel has individual button LEDs for each function.
+### Protocol (reverse-engineered via nRF52840 Wireshark capture, July 2026)
 
-The plugin sends `ClientAv|BL_*=` backlight packets via UDP, but the SHB1000S firmware currently ignores these — the bezel manages its own LED state internally. Reverse-engineering the LED control protocol requires sniffing the Simionic iOS app on Windows, which is planned for a future session.
+The SHB1000S uses a single BLE characteristic (`f62a9f56-...`, handle `0x0008`) for both button input (notifications) and LED output (writes). Single-byte writes control the bezel:
+
+| Byte value | Effect |
+|---|---|
+| `0x00` | Reset — all LEDs off, backlight off |
+| `0x01–0x40` (1–64) | Backlight brightness — affects PFD bezel, MFD bezel, and audio panel simultaneously |
+| `>0x40` | Turn ON the LED for the button whose UKP release value equals this byte |
+
+The plugin sends a binary UDP packet to `x1000_bezel.py` on port 15684:
+- Byte 0: brightness (0–64, mapped from X-Plane `instrument_brightness_ratio`)
+- Bytes 1..N: UKP release values of buttons whose LEDs should be on
+
+The bezel script writes the brightness byte, then each active LED byte individually to the bezel via BLE.
+
+### Audio panel LED UKP values
+
+| Button | UKP release value |
+|---|---|
+| COM1/MIC | 43 |
+| COM2/MIC | 45 |
+| COM1 monitor | 51 |
+| COM2 monitor | 53 |
+| NAV1 | 131 |
+| NAV2 | 133 |
+| ADF | 127 |
+| DME | 125 |
+| MKR/MUTE | 121 |
+| SPKR | 119 |
 
 ---
 
@@ -366,17 +422,17 @@ All tuning parameters are defined at the **top of `src/UKPHandler.cpp`** in a de
 
 | Define | Default | Effect |
 |---|---|---|
-| `KNOB_NOISE_MS` | 0.12s | Direction noise filter — opposite clicks within this window are ignored |
-| `KNOB_FAST_THRESHOLD` | 0.08s | Clicks faster than this trigger fast-spin mode |
+| `KNOB_NOISE_MS` | 0.01s | Direction noise filter — opposite clicks within this window are ignored |
+| `KNOB_FAST_THRESHOLD` | 0.15s | Clicks faster than this trigger fast-spin mode |
 | `KNOB_FAST_REPEAT` | 10 | Commands fired per click in fast-spin mode |
 | `HOLD_DELAY_S` | 0.5s | Hold time before NOSE UP/DOWN and cursor keys start repeating |
-| `HOLD_RATE_S` | 0.2s | Repeat interval (0.2 = 5/sec) for NOSE UP/DOWN |
+| `HOLD_RATE_S` | 0.2s | Repeat interval (0.2s = 5/sec) for NOSE UP/DOWN |
+| `KNOB_DEBUG_LOG` | 0 | Set to 1 to log every knob event with timing to Log.txt |
 
 **Rules:**
-- `KNOB_NOISE_MS` must be ≥ `KNOB_FAST_THRESHOLD` to avoid filtering valid fast clicks
-- Bug moves too slowly during fast spin → decrease `KNOB_NOISE_MS`
-- Fast-spin requires too much speed → increase `KNOB_FAST_THRESHOLD`
-- Recommended alternative: `KNOB_NOISE_MS = 0.10`, `KNOB_FAST_THRESHOLD = 0.12`
+- `KNOB_NOISE_MS` must be ≤ `KNOB_FAST_THRESHOLD` to avoid filtering valid fast clicks
+- Bug moves too slowly or not at all during fast spin → decrease `KNOB_NOISE_MS`
+- Fast-spin mode requires too much speed to trigger → increase `KNOB_FAST_THRESHOLD`
 
 ---
 

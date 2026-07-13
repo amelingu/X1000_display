@@ -1,17 +1,19 @@
 // BacklightManager.cpp — Reads X-Plane autopilot / audio datarefs and
-// pushes backlight state updates to both bezels at 5 Hz.
+// pushes LED state updates to x1000_bezel.py at 5 Hz.
 //
-// Wire format sent to each iPad on port 15684:
-//   ClientAv|BL_AP=1|BL_FD=0|BL_HDG=1|BL_NAV=0|BL_ALT=1|BL_VS=0|
-//            BL_FLC=0|BL_APR=0|BL_BC=0|BL_VNV=0|BL_BRIGHT=80
+// New wire format (plugin → x1000_bezel.py on port 15684, binary):
+//   Byte 0:     brightness (0=off, 64=max) — maps to X-Plane panel brightness
+//   Bytes 1..N: UKP release values for buttons whose LED should be ON
 //
-// PFD message additionally includes audio panel LEDs:
-//   ...|BL_AUDIO_COM1=1|BL_AUDIO_COM2=0|BL_AUDIO_NAV1=0|BL_AUDIO_NAV2=0|
-//       BL_AUDIO_MIC1=1|BL_AUDIO_MIC2=0|BL_AUDIO_SPKR=0
+// The bezel script writes brightness then each LED byte to BLE handle 0x0008.
 //
-// The iPad app parses these and forwards to the bezel via Bluetooth.
-// Individual backlights are independent; BL_BRIGHT is the general
-// non-active-mode LED intensity (0–100).
+// Audio panel LED UKP release values (from Wireshark capture, July 2026):
+//   COM1/MIC=43  COM2/MIC=45  COM3/MIC=47
+//   COM1=51      COM2=53      COM3=55      COM1/2=49
+//   NAV1=131     NAV2=133     ADF=127      DME=125     AUX=129
+//   SPKR=119     MKR/MUTE=121 HI_SENS=123
+//   TEL=115      PA=117       MAN_SQ=135   PLAY=137
+//   PILOT=139    COPLT=141    DISPLAY_BACKUP=143
 
 #include "BacklightManager.h"
 #include "Platform.h"
@@ -19,14 +21,7 @@
 #include <XPLMUtilities.h>
 #include <cstdio>
 #include <cstring>
-#include <ctime>
-#include <sstream>
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-// now_seconds() from Platform::
+#include <vector>
 
 static int readInt(XPLMDataRef dr) {
     return dr ? XPLMGetDatai(dr) : 0;
@@ -39,24 +34,17 @@ static float readFloat(XPLMDataRef dr) {
 // ---------------------------------------------------------------------------
 
 bool BezelLights::operator==(const BezelLights& o) const {
-    return ap         == o.ap
-        && fd         == o.fd
-        && hdg        == o.hdg
-        && nav        == o.nav
-        && alt        == o.alt
-        && vs         == o.vs
-        && flc        == o.flc
-        && apr        == o.apr
-        && bc         == o.bc
-        && vnv        == o.vnv
-        && audio_com1 == o.audio_com1
-        && audio_com2 == o.audio_com2
-        && audio_nav1 == o.audio_nav1
-        && audio_nav2 == o.audio_nav2
-        && audio_mic1 == o.audio_mic1
-        && audio_mic2 == o.audio_mic2
-        && audio_spkr == o.audio_spkr
-        && brightness == o.brightness;
+    return brightness    == o.brightness
+        && audio_com1    == o.audio_com1
+        && audio_com2    == o.audio_com2
+        && audio_nav1    == o.audio_nav1
+        && audio_nav2    == o.audio_nav2
+        && audio_adf1    == o.audio_adf1
+        && audio_dme1    == o.audio_dme1
+        && audio_mkr     == o.audio_mkr
+        && audio_mic1    == o.audio_mic1
+        && audio_mic2    == o.audio_mic2
+        && audio_spkr    == o.audio_spkr;
 }
 
 // ---------------------------------------------------------------------------
@@ -65,143 +53,91 @@ BacklightManager::BacklightManager()
     : m_initialized(false), m_last_tick_time(0.0) {}
 
 void BacklightManager::init() {
-    // ---- Autopilot datarefs ----
-    // flight_director_mode: 0=off, 1=on/FD, 2=engaged(AP)
-    m_refs.ap_state  = (int*)XPLMFindDataRef("sim/cockpit2/autopilot/flight_director_mode");
-    m_refs.fd_state  = m_refs.ap_state;  // same dataref, different threshold
-    m_refs.hdg_mode  = (int*)XPLMFindDataRef("sim/cockpit2/autopilot/heading_mode");
-    m_refs.nav_mode  = (int*)XPLMFindDataRef("sim/cockpit2/autopilot/nav_mode");
-    m_refs.alt_hold  = (int*)XPLMFindDataRef("sim/cockpit2/autopilot/altitude_hold_mode");
-    m_refs.vs_mode   = (int*)XPLMFindDataRef("sim/cockpit2/autopilot/vvi_status");
-    m_refs.flc_mode  = (int*)XPLMFindDataRef("sim/cockpit2/autopilot/airspeed_status");
-    m_refs.apr_mode  = (int*)XPLMFindDataRef("sim/cockpit2/autopilot/approach_status");
-    m_refs.bc_mode   = (int*)XPLMFindDataRef("sim/cockpit2/autopilot/backcourse_status");
-    m_refs.vnv_mode  = (int*)XPLMFindDataRef("sim/cockpit2/autopilot/vnav_status");
+    // Audio panel datarefs
+    auto fdr = [](const char* n) -> XPLMDataRef {
+        XPLMDataRef dr = XPLMFindDataRef(n);
+        return dr;
+    };
+    m_refs.audio_sel_com1 = fdr("sim/cockpit2/radios/actuators/audio_selection_com1");
+    m_refs.audio_sel_com2 = fdr("sim/cockpit2/radios/actuators/audio_selection_com2");
+    m_refs.audio_sel_nav1 = fdr("sim/cockpit2/radios/actuators/audio_selection_nav1");
+    m_refs.audio_sel_nav2 = fdr("sim/cockpit2/radios/actuators/audio_selection_nav2");
+    m_refs.audio_sel_adf1 = fdr("sim/cockpit2/radios/actuators/audio_selection_adf1");
+    m_refs.audio_sel_dme1 = fdr("sim/cockpit2/radios/actuators/audio_selection_dme1");
+    m_refs.audio_spkr     = fdr("sim/cockpit2/radios/actuators/audio_speaker_enable");
+    m_refs.audio_mkr      = fdr("sim/cockpit2/radios/actuators/audio_selection_mkr");
+    m_refs.audio_com_sel  = fdr("sim/cockpit2/radios/actuators/audio_com_selection");
 
-    // ---- Audio panel datarefs ----
-    // audio_com_selection_pilot: bitmask — bit0=COM1, bit1=COM2
-    m_refs.audio_com_sel = (int*)XPLMFindDataRef(
-        "sim/cockpit2/radios/actuators/audio_com_selection_pilot");
-    // audio_nav_selection_pilot: bitmask — bit0=NAV1, bit1=NAV2
-    m_refs.audio_nav_sel = (int*)XPLMFindDataRef(
-        "sim/cockpit2/radios/actuators/audio_nav_selection_pilot");
-    // audio_selection_pilot: 1=COM1, 2=COM2 (active mic)
-    m_refs.audio_mic_sel = (int*)XPLMFindDataRef(
-        "sim/cockpit2/radios/actuators/audio_selection_pilot");
-    m_refs.audio_spkr = (int*)XPLMFindDataRef(
-        "sim/cockpit2/radios/actuators/audio_speaker_enable");
-
-    // ---- Panel brightness ----
+    // Panel brightness — used to set bezel backlight
     m_refs.panel_bright = (float*)XPLMFindDataRef(
         "sim/cockpit2/switches/instrument_brightness_ratio[0]");
 
-    // Warn on any missing datarefs (not fatal — we default to 0)
-    if (!m_refs.ap_state)      XPLMDebugString("[X1000] BacklightManager: AP dataref not found\n");
-    if (!m_refs.audio_com_sel) XPLMDebugString("[X1000] BacklightManager: audio COM dataref not found\n");
-    if (!m_refs.audio_mic_sel) XPLMDebugString("[X1000] BacklightManager: audio MIC dataref not found\n");
+    if (!m_refs.audio_sel_com1)
+        XPLMDebugString("[X1000] BacklightManager: audio COM dataref not found\n");
+    if (!m_refs.audio_com_sel)
+        XPLMDebugString("[X1000] BacklightManager: audio MIC dataref not found\n");
 
     m_initialized = true;
     XPLMDebugString("[X1000] BacklightManager: initialised\n");
 }
 
 // ---------------------------------------------------------------------------
-// Read current X-Plane state → BezelLights
-// ---------------------------------------------------------------------------
 
 BezelLights BacklightManager::readPFDLights() {
     BezelLights l;
 
-    // AP: flight_director_mode >= 2 means autopilot engaged
-    int fd_mode = readInt((XPLMDataRef)m_refs.ap_state);
-    l.ap  = (fd_mode >= 2);
-    l.fd  = (fd_mode >= 1);
+    l.audio_com1 = (readInt(m_refs.audio_sel_com1) != 0);
+    l.audio_com2 = (readInt(m_refs.audio_sel_com2) != 0);
+    l.audio_nav1 = (readInt(m_refs.audio_sel_nav1) != 0);
+    l.audio_nav2 = (readInt(m_refs.audio_sel_nav2) != 0);
+    l.audio_adf1 = (readInt(m_refs.audio_sel_adf1) != 0);
+    l.audio_dme1 = (readInt(m_refs.audio_sel_dme1) != 0);
+    l.audio_mkr  = (readInt(m_refs.audio_mkr)      != 0);
+    l.audio_spkr = (readInt(m_refs.audio_spkr)     != 0);
 
-    l.hdg = (readInt((XPLMDataRef)m_refs.hdg_mode) > 0);
-    l.nav = (readInt((XPLMDataRef)m_refs.nav_mode)  > 0);
-    l.alt = (readInt((XPLMDataRef)m_refs.alt_hold)  > 0);
-    l.vs  = (readInt((XPLMDataRef)m_refs.vs_mode)   > 0);
-    l.flc = (readInt((XPLMDataRef)m_refs.flc_mode)  > 0);
-    l.apr = (readInt((XPLMDataRef)m_refs.apr_mode)  > 0);
-    l.bc  = (readInt((XPLMDataRef)m_refs.bc_mode)   > 0);
-    l.vnv = (readInt((XPLMDataRef)m_refs.vnv_mode)  > 0);
+    int mic_sel  = readInt(m_refs.audio_com_sel);
+    l.audio_mic1 = (mic_sel == 6);
+    l.audio_mic2 = (mic_sel == 7);
 
-    // Audio panel — bitmask reads
-    int com_sel = readInt((XPLMDataRef)m_refs.audio_com_sel);
-    int nav_sel = readInt((XPLMDataRef)m_refs.audio_nav_sel);
-    int mic_sel = readInt((XPLMDataRef)m_refs.audio_mic_sel);
-
-    l.audio_com1 = (com_sel & 0x01) != 0;
-    l.audio_com2 = (com_sel & 0x02) != 0;
-    l.audio_nav1 = (nav_sel & 0x01) != 0;
-    l.audio_nav2 = (nav_sel & 0x02) != 0;
-    l.audio_mic1 = (mic_sel == 1);
-    l.audio_mic2 = (mic_sel == 2);
-    l.audio_spkr = (readInt((XPLMDataRef)m_refs.audio_spkr) != 0);
-
-    // Panel brightness → 0-100
+    // Panel brightness → 0-64 range (bezel scale)
     float bright = readFloat((XPLMDataRef)m_refs.panel_bright);
-    l.brightness = (uint8_t)(bright * 100.0f);
+    l.brightness = (uint8_t)(bright * 64.0f);
 
     return l;
 }
 
 BezelLights BacklightManager::readMFDLights() {
-    // MFD has no audio panel; autopilot annunciators mirror PFD.
+    // MFD has no audio panel — just brightness
     BezelLights l;
-    int fd_mode = readInt((XPLMDataRef)m_refs.ap_state);
-    l.ap  = (fd_mode >= 2);
-    l.fd  = (fd_mode >= 1);
-    l.hdg = (readInt((XPLMDataRef)m_refs.hdg_mode) > 0);
-    l.nav = (readInt((XPLMDataRef)m_refs.nav_mode)  > 0);
-    l.alt = (readInt((XPLMDataRef)m_refs.alt_hold)  > 0);
-    l.vs  = (readInt((XPLMDataRef)m_refs.vs_mode)   > 0);
-    l.flc = (readInt((XPLMDataRef)m_refs.flc_mode)  > 0);
-    l.apr = (readInt((XPLMDataRef)m_refs.apr_mode)  > 0);
-    l.bc  = (readInt((XPLMDataRef)m_refs.bc_mode)   > 0);
-    l.vnv = (readInt((XPLMDataRef)m_refs.vnv_mode)  > 0);
-
     float bright = readFloat((XPLMDataRef)m_refs.panel_bright);
-    l.brightness = (uint8_t)(bright * 100.0f);
-
+    l.brightness = (uint8_t)(bright * 64.0f);
     return l;
 }
 
 // ---------------------------------------------------------------------------
-// Serialise to wire format
+// Serialise to binary LED state packet
+// Format: 1 byte brightness + N bytes of active LED UKP values
 // ---------------------------------------------------------------------------
 
-std::string BacklightManager::serialise(const BezelLights& l, bool include_audio) {
-    char buf[512];
-    int n = snprintf(buf, sizeof(buf),
-        "ClientAv|BL_AP=%d|BL_FD=%d|BL_HDG=%d|BL_NAV=%d|BL_ALT=%d"
-        "|BL_VS=%d|BL_FLC=%d|BL_APR=%d|BL_BC=%d|BL_VNV=%d|BL_BRIGHT=%d",
-        l.ap  ? 1 : 0,
-        l.fd  ? 1 : 0,
-        l.hdg ? 1 : 0,
-        l.nav ? 1 : 0,
-        l.alt ? 1 : 0,
-        l.vs  ? 1 : 0,
-        l.flc ? 1 : 0,
-        l.apr ? 1 : 0,
-        l.bc  ? 1 : 0,
-        l.vnv ? 1 : 0,
-        l.brightness);
+static std::string serialiseBinary(const BezelLights& l, bool include_audio) {
+    std::vector<uint8_t> packet;
+    packet.push_back(l.brightness);
 
-    if (include_audio && n < (int)sizeof(buf) - 1) {
-        snprintf(buf + n, sizeof(buf) - n,
-            "|BL_AUDIO_COM1=%d|BL_AUDIO_COM2=%d"
-            "|BL_AUDIO_NAV1=%d|BL_AUDIO_NAV2=%d"
-            "|BL_AUDIO_MIC1=%d|BL_AUDIO_MIC2=%d|BL_AUDIO_SPKR=%d",
-            l.audio_com1 ? 1 : 0,
-            l.audio_com2 ? 1 : 0,
-            l.audio_nav1 ? 1 : 0,
-            l.audio_nav2 ? 1 : 0,
-            l.audio_mic1 ? 1 : 0,
-            l.audio_mic2 ? 1 : 0,
-            l.audio_spkr ? 1 : 0);
+    if (include_audio) {
+        // Audio panel button LED UKP release values
+        if (l.audio_mic1) packet.push_back(43);   // COM1/MIC
+        if (l.audio_mic2) packet.push_back(45);   // COM2/MIC
+        if (l.audio_com1) packet.push_back(51);   // COM1 monitor
+        if (l.audio_com2) packet.push_back(53);   // COM2 monitor
+        if (l.audio_nav1) packet.push_back(131);  // NAV1
+        if (l.audio_nav2) packet.push_back(133);  // NAV2
+        if (l.audio_adf1) packet.push_back(127);  // ADF
+        if (l.audio_dme1) packet.push_back(125);  // DME
+        if (l.audio_mkr)  packet.push_back(121);  // MKR/MUTE
+        if (l.audio_spkr) packet.push_back(119);  // SPKR
     }
 
-    return std::string(buf);
+    return std::string(reinterpret_cast<const char*>(packet.data()), packet.size());
 }
 
 // ---------------------------------------------------------------------------
@@ -218,18 +154,18 @@ void BacklightManager::tick(UDPSocket& sock,
     if ((t - m_last_tick_time) < TICK_INTERVAL) return;
     m_last_tick_time = t;
 
-    // PFD
+    // PFD (includes audio panel LEDs)
     BezelLights pfd = readPFDLights();
     if (pfd != m_last_pfd) {
-        std::string msg = serialise(pfd, /*include_audio=*/true);
+        std::string msg = serialiseBinary(pfd, /*include_audio=*/true);
         sock.send(msg, pfd_ip, send_port);
         m_last_pfd = pfd;
     }
 
-    // MFD
+    // MFD (brightness only)
     BezelLights mfd = readMFDLights();
     if (mfd != m_last_mfd) {
-        std::string msg = serialise(mfd, /*include_audio=*/false);
+        std::string msg = serialiseBinary(mfd, /*include_audio=*/false);
         sock.send(msg, mfd_ip, send_port);
         m_last_mfd = mfd;
     }
