@@ -60,8 +60,8 @@ private:
         XPLMDataRef audio_spkr     = nullptr;
         XPLMDataRef audio_mkr      = nullptr;
         XPLMDataRef audio_com_sel  = nullptr;  // 6=COM1 mic, 7=COM2 mic
-        // Brightness
-        float*      panel_bright   = nullptr;
+        // Brightness (array dataref — read index 3)
+        XPLMDataRef panel_bright   = nullptr;
     } m_refs;
 
     BezelLights m_last_pfd;

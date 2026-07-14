@@ -15,6 +15,7 @@
 RelayManager::RelayManager()
     : m_pfd_port(9000), m_mfd_port(9001)
     , m_monitor_running(false)
+    , m_auto_restart(false)
     , m_extra_args("")
 {}
 
@@ -148,11 +149,16 @@ void RelayManager::monitorThread() {
         if (chunk.empty()) {
             if (m_handle.isValid() && !Platform::isProcessAlive(m_handle)) {
                 if (m_monitor_running) {
-                    // Only flag as unexpected if not a scan (scan exits normally)
                     bool is_scan = (m_extra_args.find("--scan") != std::string::npos);
                     if (!is_scan) {
                         addLog("Relay process exited unexpectedly.", true);
                         XPLMDebugString("[X1000] Relay process exited unexpectedly.\n");
+                        if (m_auto_restart) {
+                            XPLMDebugString("[X1000] Relay: auto-restarting...\n");
+                            Platform::sleep_ms(3000);
+                            start();
+                            return;  // new monitor thread launched by start()
+                        }
                     }
                 }
                 break;

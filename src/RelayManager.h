@@ -30,6 +30,7 @@ public:
 
     void restart(uint16_t pfd_port, uint16_t mfd_port);
     void restart_scan();         // restart in scan mode, output BEZEL_FOUND: lines
+    void setAutoRestart(bool v) { m_auto_restart = v; }  // restart on unexpected exit
     void restart_with_args(const std::string& args);  // restart with new extra args
 
     std::vector<RelayLogEntry> getLog();
@@ -47,6 +48,7 @@ private:
 
     std::thread              m_monitor;
     std::atomic<bool>        m_monitor_running;
+    std::atomic<bool>        m_auto_restart;
     std::vector<RelayLogEntry> m_log;
     std::mutex               m_log_mutex;
 

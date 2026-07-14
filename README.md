@@ -356,6 +356,20 @@ Install bleak once:
 pip install bleak --break-system-packages
 ```
 
+### Running alongside the Simionic plugin
+
+Running X1000_display and the Simionic plugin simultaneously is not supported — both plugins use UDP port 15683/15685 for bezel input, causing a bind conflict that prevents X1000_display from receiving bezel button presses. The Bluetooth adapter conflict (bleak vs Simionic) also prevents BLE connections.
+
+If you need to run both plugins, change the bezel ports in `X1000_display.ini` to avoid the conflict:
+
+```ini
+[bezel]
+bezel_pfd_port=15693
+bezel_mfd_port=15695
+```
+
+Note: the Simionic plugin must be disabled or unloaded before starting X1000_display for BLE to work correctly.
+
 ---
 
 ## Bezel LED Control

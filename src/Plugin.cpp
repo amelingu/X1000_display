@@ -260,25 +260,8 @@ PLUGIN_API int XPluginEnable() {
                             bezel_args);
 
         if (!bs.pfd_bezel_mac.empty() || !bs.mfd_bezel_mac.empty()) {
-#if !defined(_WIN32)
-            // On Linux/Mac: force BlueZ to release any stale BLE connection
-            // before launching bleak, so bezels are discoverable again.
-            XPLMDebugString("[X1000] Bezel: disconnecting any existing BLE connections...\n");
-            if (!bs.pfd_bezel_mac.empty()) {
-                std::string cmd = "bluetoothctl disconnect " + bs.pfd_bezel_mac + " 2>/dev/null";
-                { int r = system(cmd.c_str()); (void)r; }
-            }
-            if (!bs.mfd_bezel_mac.empty()) {
-                std::string cmd = "bluetoothctl disconnect " + bs.mfd_bezel_mac + " 2>/dev/null";
-                { int r = system(cmd.c_str()); (void)r; }
-            }
-            { int r = system("sleep 1"); (void)r; }
-#else
-            // On Windows: the Windows BLE stack manages connections differently.
-            // bleak handles reconnection internally — no explicit disconnect needed.
-            XPLMDebugString("[X1000] Bezel: starting BLE bridge (Windows)...\n");
-            Platform::sleep_ms(500);
-#endif
+            // bleak handles BLE reconnection internally with retries.
+            // No explicit bluetoothctl disconnect needed — it causes InProgress errors.
             XPLMDebugString("[X1000] Bezel: starting BLE bridge...\n");
             g_bezel_relay->start();
         } else {

@@ -68,9 +68,12 @@ void BacklightManager::init() {
     m_refs.audio_mkr      = fdr("sim/cockpit2/radios/actuators/audio_selection_mkr");
     m_refs.audio_com_sel  = fdr("sim/cockpit2/radios/actuators/audio_com_selection");
 
-    // Panel brightness — used to set bezel backlight
-    m_refs.panel_bright = (float*)XPLMFindDataRef(
-        "sim/cockpit2/switches/instrument_brightness_ratio[0]");
+    // Panel brightness — 4th value of panel_brightness_ratio array (index 3)
+    // In C172, this follows the main panel brightness knob.
+    m_refs.panel_bright = XPLMFindDataRef(
+        "sim/cockpit2/electrical/panel_brightness_ratio");
+    if (!m_refs.panel_bright)
+        XPLMDebugString("[X1000] BacklightManager: panel brightness dataref not found\n");
 
     if (!m_refs.audio_sel_com1)
         XPLMDebugString("[X1000] BacklightManager: audio COM dataref not found\n");
@@ -99,8 +102,11 @@ BezelLights BacklightManager::readPFDLights() {
     l.audio_mic1 = (mic_sel == 6);
     l.audio_mic2 = (mic_sel == 7);
 
-    // Panel brightness → 0-64 range (bezel scale)
-    float bright = readFloat((XPLMDataRef)m_refs.panel_bright);
+    // Read 4th value (index 3) of panel_brightness_ratio array → 0-64 bezel scale
+    float bright = 0.0f;
+    if (m_refs.panel_bright) {
+        XPLMGetDatavf(m_refs.panel_bright, &bright, 3, 1);
+    }
     l.brightness = (uint8_t)(bright * 64.0f);
 
     return l;
@@ -109,7 +115,10 @@ BezelLights BacklightManager::readPFDLights() {
 BezelLights BacklightManager::readMFDLights() {
     // MFD has no audio panel — just brightness
     BezelLights l;
-    float bright = readFloat((XPLMDataRef)m_refs.panel_bright);
+    float bright = 0.0f;
+    if (m_refs.panel_bright) {
+        XPLMGetDatavf(m_refs.panel_bright, &bright, 3, 1);
+    }
     l.brightness = (uint8_t)(bright * 64.0f);
     return l;
 }
@@ -159,6 +168,12 @@ void BacklightManager::tick(UDPSocket& sock,
     if (pfd != m_last_pfd) {
         std::string msg = serialiseBinary(pfd, /*include_audio=*/true);
         sock.send(msg, pfd_ip, send_port);
+        // Debug: log what we sent
+        char dbuf[128];
+        snprintf(dbuf, sizeof(dbuf),
+                 "[X1000] BL: PFD brightness=%d leds=%zu\n",
+                 (int)pfd.brightness, msg.size() - 1);
+        XPLMDebugString(dbuf);
         m_last_pfd = pfd;
     }
 

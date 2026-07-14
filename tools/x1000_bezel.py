@@ -1,25 +1,27 @@
 #!/usr/bin/env python3
 # x1000_bezel.py — SHB1000S bezel BLE input/output bridge
 #
-# INPUT:  BLE notifications (bezel → plugin UDP :15683/:15685) — button/knob UKP values
-# OUTPUT: BLE writes (plugin UDP :15684 → bezel) — LED states and backlight brightness
+# Connects to Simionic SHB1000S bezel(s) via Bluetooth LE,
+# subscribes to button/knob notifications, and forwards
+# UKP values to the X1000_display plugin via UDP.
 #
-# BLE LED protocol (discovered via Wireshark capture, July 2026):
-#   Handle 0x0008, single byte write:
-#     0x00        = reset (all LEDs off, backlight off)
-#     0x01–0x40   = backlight brightness (1=dim, 64=max)
-#     0x41+       = turn ON the LED for the button with that UKP release value
-#   Handle 0x0009, write 0x0200 once on connect = enable notifications
+# Also receives LED state from the plugin on UDP :15684 and
+# writes brightness/LED bytes to the bezel via BLE.
 #
-# LED state UDP protocol (plugin → x1000_bezel.py on port 15684):
-#   Binary packet: 1 byte brightness (0-64) + N bytes of active LED UKP values
-#   Example: b'\x28\x33\x6b\x6d' = brightness 40, COM1 on, NAV1 on, COM1/MIC on
+# BLE LED protocol (handle 0x0008, single byte write):
+#   0x00        = reset (all LEDs off, backlight off)
+#   0x01-0x40   = backlight brightness (1=dim, 64=max)
+#   >0x40       = turn ON LED for button with that UKP release value
+#
+# LED UDP packet from plugin (port 15684, binary):
+#   Byte 0:     brightness (0-64)
+#   Bytes 1..N: UKP release values for active button LEDs
 #
 # Requirements:
 #   pip install bleak --break-system-packages
 #
 # Usage:
-#   python3 x1000_bezel.py                          # auto-scan for bezels
+#   python3 x1000_bezel.py                          # auto-scan for SHB1000
 #   python3 x1000_bezel.py --pfd 00:07:80:A6:E1:71 --mfd 00:07:80:A6:F5:0A
 #   python3 x1000_bezel.py --scan                   # scan and identify PFD
 
@@ -28,7 +30,6 @@ import socket
 import logging
 import argparse
 import sys
-import struct
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s %(levelname)s %(message)s')
@@ -45,14 +46,13 @@ except ImportError:
 # Constants
 # ---------------------------------------------------------------------------
 
-BEZEL_CHAR_UUID   = "f62a9f56-f29e-48a8-a317-47ee37a58999"
-BEZEL_CCCD_HANDLE = 0x0009   # write 0x0200 once to enable notifications
-BEZEL_LED_HANDLE  = 0x0008   # single byte: brightness or LED UKP value
+BEZEL_CHAR_UUID  = "f62a9f56-f29e-48a8-a317-47ee37a58999"
+BEZEL_LED_HANDLE = 0x0008   # single byte: brightness or LED UKP value
 
-DEFAULT_PLUGIN_IP   = "127.0.0.1"
-DEFAULT_PFD_PORT    = 15683
-DEFAULT_MFD_PORT    = 15685
-DEFAULT_LED_PORT    = 15684   # plugin sends LED state here
+DEFAULT_PLUGIN_IP = "127.0.0.1"
+DEFAULT_PFD_PORT  = 15683
+DEFAULT_MFD_PORT  = 15685
+DEFAULT_LED_PORT  = 15684   # plugin sends LED state here
 
 BEZEL_NAME_FILTER = "1000"
 
@@ -75,19 +75,17 @@ class UDPSender:
         self.sock.close()
 
 # ---------------------------------------------------------------------------
-# LED state receiver (plugin → bezel script → BLE)
+# LED state receiver (plugin → bezel script)
 # ---------------------------------------------------------------------------
 
 class LEDReceiver:
-    """Listens on a UDP port for LED state packets from the plugin.
-    Packet format: 1 byte brightness + N bytes of active LED UKP values.
-    Brightness range: 0 (off) to 64 (max).
-    LED values: UKP release values for buttons that should be lit."""
+    """Listens on UDP for binary LED state packets from the plugin.
+    Packet: byte 0 = brightness (0-64), bytes 1..N = active LED UKP values."""
 
     def __init__(self, port: int):
         self.port       = port
         self.brightness = 0
-        self.leds       = set()   # set of active LED UKP values
+        self.leds       = set()
         self._sock      = None
 
     def start(self):
@@ -121,7 +119,7 @@ class LEDReceiver:
             self._sock.close()
 
 # ---------------------------------------------------------------------------
-# Bezel client (BLE connection)
+# Bezel client
 # ---------------------------------------------------------------------------
 
 class BezelClient:
@@ -139,12 +137,13 @@ class BezelClient:
 
         # On Windows, pre-scan so bleak can discover the device by MAC
         if sys.platform == 'win32':
-            log.info(f"{self.name}: pre-scanning (Windows)...")
+            log.info(f"{self.name}: pre-scanning for device (Windows)...")
             try:
                 await BleakScanner.discover(timeout=5.0)
             except Exception as e:
                 log.warning(f"{self.name}: pre-scan failed: {e}")
 
+        # Recreate client to ensure clean state
         try:
             if self.client.is_connected:
                 await self.client.disconnect()
@@ -153,10 +152,18 @@ class BezelClient:
         except Exception:
             self.client = BleakClient(self.mac)
 
+        # Retry loop — with timeout to prevent infinite hang
         for attempt in range(5):
             try:
-                await self.client.connect()
+                await asyncio.wait_for(self.client.connect(), timeout=10.0)
                 break
+            except asyncio.TimeoutError:
+                log.warning(f"{self.name}: connect attempt {attempt+1}/5 timed out")
+                if attempt < 4:
+                    self.client = BleakClient(self.mac)
+                    await asyncio.sleep(2.0)
+                else:
+                    raise asyncio.TimeoutError(f"{self.name}: connect timed out after 5 attempts")
             except Exception as e:
                 log.warning(f"{self.name}: connect attempt {attempt+1}/5 failed: {e}")
                 if attempt < 4:
@@ -167,63 +174,53 @@ class BezelClient:
 
         log.info(f"{self.name}: connected")
 
-        # Enable notifications (write 0x0200 to CCCD handle)
-        try:
-            await self.client.write_gatt_char(BEZEL_CCCD_HANDLE,
-                                              bytearray([0x02, 0x00]),
-                                              response=True)
-            log.info(f"{self.name}: notifications enabled")
-        except Exception as e:
-            log.warning(f"{self.name}: CCCD write failed: {e}")
-
         # Subscribe to button notifications
         await self.client.start_notify(BEZEL_CHAR_UUID, self._on_notification)
         log.info(f"{self.name}: subscribed to button notifications")
 
         # Reset LED state
         await self._write_led(0x00)
-        self._last_brightness = 0
+        self._last_brightness = -1
         self._last_leds       = set()
 
     async def disconnect(self):
         if self.client.is_connected:
-            await self._write_led(0x00)
-            await self.client.stop_notify(BEZEL_CHAR_UUID)
+            try:
+                await self._write_led(0x00)
+                await self.client.stop_notify(BEZEL_CHAR_UUID)
+            except Exception:
+                pass
             await self.client.disconnect()
             log.info(f"{self.name}: disconnected")
 
     async def _write_led(self, value: int):
         """Write a single byte to the LED control handle."""
         try:
-            await self.client.write_gatt_char(BEZEL_LED_HANDLE,
-                                              bytearray([value]),
-                                              response=False)
+            await self.client.write_gatt_char(
+                BEZEL_LED_HANDLE, bytearray([value]), response=False)
         except Exception as e:
             log.debug(f"{self.name}: LED write failed: {e}")
 
     async def update_leds(self, brightness: int, leds: set):
-        """Push updated LED state to the bezel.
-        Writes brightness byte first, then each active LED UKP value."""
+        """Push updated LED state to the bezel."""
         if not self.client.is_connected:
             return
 
-        # Write brightness (clamp to 0-64)
         b = max(0, min(64, brightness))
-        if b != self._last_brightness:
+
+        # Only update if something changed
+        if b == self._last_brightness and leds == self._last_leds:
+            return
+
+        # Reset then write new state
+        await self._write_led(0x00)
+        if b > 0:
             await self._write_led(b)
-            self._last_brightness = b
+        for ukp in sorted(leds):
+            await self._write_led(ukp)
 
-        # Turn off LEDs that are no longer active
-        for ukp in self._last_leds - leds:
-            await self._write_led(0x00)   # reset then re-send active ones
-            break  # one reset clears all — resend active below
-
-        # Write active LED UKP values
-        if leds != self._last_leds:
-            await self._write_led(0x00)   # clear first
-            for ukp in leds:
-                await self._write_led(ukp)
-            self._last_leds = set(leds)
+        self._last_brightness = b
+        self._last_leds       = set(leds)
 
     def _on_notification(self, handle, data: bytearray):
         for byte in data:
@@ -231,7 +228,7 @@ class BezelClient:
             if self._frame_count == 1:
                 log.info(f"{self.name}: first UKP received: {byte}")
             self.sender.send_ukp(byte)
-            log.debug(f"{self.name}: UKP={byte} ({'press/CW' if byte % 2 == 0 else 'release/CCW'})")
+            log.debug(f"{self.name}: UKP={byte}")
 
     @property
     def is_connected(self):
@@ -326,7 +323,7 @@ async def main(args):
         mfd_sender.close()
         return
 
-    # Normal mode — determine MACs
+    # Normal mode
     pfd_mac = args.pfd
     mfd_mac = args.mfd
 
@@ -343,11 +340,11 @@ async def main(args):
             mfd_mac = bezels[1][0]
             log.info(f"Auto-assigned MFD: {bezels[1][1]} {mfd_mac}")
 
-    # LED state receiver
+    # LED receiver
     led_rx = LEDReceiver(args.led_port)
     led_rx.start()
 
-    # Connect bezels
+    # Build client list
     clients = []
     if pfd_mac:
         clients.append(BezelClient(pfd_mac, "PFD", pfd_sender))
@@ -359,7 +356,12 @@ async def main(args):
         led_rx.close()
         return
 
-    for client in clients:
+    # Connect sequentially with delay between each — BlueZ adapter needs
+    # time to complete one connection before starting the next.
+    for i, client in enumerate(clients):
+        if i > 0:
+            log.info(f"Waiting 3s before connecting next bezel...")
+            await asyncio.sleep(3.0)
         try:
             await client.connect()
         except Exception as e:
@@ -375,28 +377,45 @@ async def main(args):
 
     log.info(f"{len(connected)} bezel(s) connected. Press Ctrl+C to stop.")
 
-    # Main loop — poll LED state and push to bezels
+    # Main loop — keep alive + push LED state
+    loop_count = 0
     try:
         while True:
-            await asyncio.sleep(0.1)   # 10Hz poll
+            await asyncio.sleep(0.2)   # 5Hz
+            loop_count += 1
 
             # Poll LED state from plugin
-            led_rx.poll()
+            changed = led_rx.poll()
 
-            # Push to all connected bezels
+            # Log status every 5s (25 iterations)
+            if loop_count % 25 == 1:
+                c0 = clients[0].is_connected if clients else False
+                c1 = clients[1].is_connected if len(clients) > 1 else False
+                log.info(f"loop#{loop_count} PFD_conn={c0} MFD_conn={c1} "
+                         f"bright={led_rx.brightness} leds={sorted(led_rx.leds)} changed={changed}")
+
+            # Push LED state to PFD bezel (has audio panel)
+            if clients and clients[0].is_connected:
+                await clients[0].update_leds(led_rx.brightness, led_rx.leds)
+
+            # Push brightness only to MFD bezel
+            if len(clients) > 1 and clients[1].is_connected:
+                await clients[1].update_leds(led_rx.brightness, set())
+
+            # Reconnect if disconnected
             for client in clients:
-                if client.is_connected:
-                    await client.update_leds(led_rx.brightness, led_rx.leds)
-                else:
-                    log.warning(f"{client.name}: disconnected — reconnecting...")
+                if not client.is_connected:
+                    log.warning(f"{client.name}: disconnected — reconnecting in 3s...")
                     await asyncio.sleep(3.0)
                     try:
                         await client.connect()
-                        log.info(f"{client.name}: reconnected")
+                        log.info(f"{client.name}: reconnected successfully")
                     except Exception as e:
                         log.error(f"{client.name}: reconnect failed: {e}")
 
-    except (asyncio.CancelledError, KeyboardInterrupt):
+    except asyncio.CancelledError:
+        pass
+    except KeyboardInterrupt:
         pass
     finally:
         for client in clients:
