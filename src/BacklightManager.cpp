@@ -65,7 +65,8 @@ void BacklightManager::init() {
     m_refs.audio_sel_adf1 = fdr("sim/cockpit2/radios/actuators/audio_selection_adf1");
     m_refs.audio_sel_dme1 = fdr("sim/cockpit2/radios/actuators/audio_selection_dme1");
     m_refs.audio_spkr     = fdr("sim/cockpit2/radios/actuators/audio_speaker_enable");
-    m_refs.audio_mkr      = fdr("sim/cockpit2/radios/actuators/audio_selection_mkr");
+    m_refs.audio_mkr      = fdr("sim/cockpit2/radios/actuators/audio_marker_enabled");
+    m_refs.audio_sel_dme1 = fdr("sim/cockpit2/radios/actuators/audio_dme_enabled");
     m_refs.audio_com_sel  = fdr("sim/cockpit2/radios/actuators/audio_com_selection");
 
     // Panel brightness — 4th value of panel_brightness_ratio array (index 3)
@@ -107,7 +108,9 @@ BezelLights BacklightManager::readPFDLights() {
     if (m_refs.panel_bright) {
         XPLMGetDatavf(m_refs.panel_bright, &bright, 3, 1);
     }
-    l.brightness = (uint8_t)(bright * 64.0f);
+    // Brightness is INVERTED: 0x00=max bright, 0x40(64)=off
+    // panel_brightness_ratio: 0.0=off, 1.0=max → invert to bezel scale
+    l.brightness = (uint8_t)((1.0f - bright) * 64.0f);
 
     return l;
 }
@@ -119,7 +122,9 @@ BezelLights BacklightManager::readMFDLights() {
     if (m_refs.panel_bright) {
         XPLMGetDatavf(m_refs.panel_bright, &bright, 3, 1);
     }
-    l.brightness = (uint8_t)(bright * 64.0f);
+    // Brightness is INVERTED: 0x00=max bright, 0x40(64)=off
+    // panel_brightness_ratio: 0.0=off, 1.0=max → invert to bezel scale
+    l.brightness = (uint8_t)((1.0f - bright) * 64.0f);
     return l;
 }
 
@@ -133,17 +138,19 @@ static std::string serialiseBinary(const BezelLights& l, bool include_audio) {
     packet.push_back(l.brightness);
 
     if (include_audio) {
-        // Audio panel button LED UKP release values
-        if (l.audio_mic1) packet.push_back(43);   // COM1/MIC
-        if (l.audio_mic2) packet.push_back(45);   // COM2/MIC
-        if (l.audio_com1) packet.push_back(51);   // COM1 monitor
-        if (l.audio_com2) packet.push_back(53);   // COM2 monitor
-        if (l.audio_nav1) packet.push_back(131);  // NAV1
-        if (l.audio_nav2) packet.push_back(133);  // NAV2
-        if (l.audio_adf1) packet.push_back(127);  // ADF
-        if (l.audio_dme1) packet.push_back(125);  // DME
-        if (l.audio_mkr)  packet.push_back(121);  // MKR/MUTE
-        if (l.audio_spkr) packet.push_back(119);  // SPKR
+        // Audio panel LED bytes (discovered via systematic BLE scan, July 2026)
+        // Brightness scale: 0x00=max bright, 0x40=off (INVERTED)
+        // LED bytes: write byte to turn ON that specific LED
+        if (l.audio_mic1) packet.push_back(0x43);  // COM1/MIC
+        if (l.audio_mic2) packet.push_back(0x44);  // COM2/MIC
+        if (l.audio_com1) packet.push_back(0x47);  // COM1 monitor
+        if (l.audio_com2) packet.push_back(0x48);  // COM2 monitor
+        if (l.audio_nav1) packet.push_back(0x52);  // NAV1
+        if (l.audio_nav2) packet.push_back(0x53);  // NAV2
+        if (l.audio_adf1) packet.push_back(0x50);  // ADF
+        if (l.audio_dme1) packet.push_back(0x4f);  // DME
+        if (l.audio_mkr)  packet.push_back(0x4d);  // MKR/MUTE
+        if (l.audio_spkr) packet.push_back(0x4c);  // SPKR
     }
 
     return std::string(reinterpret_cast<const char*>(packet.data()), packet.size());

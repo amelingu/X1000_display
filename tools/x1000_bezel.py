@@ -46,8 +46,7 @@ except ImportError:
 # Constants
 # ---------------------------------------------------------------------------
 
-BEZEL_CHAR_UUID  = "f62a9f56-f29e-48a8-a317-47ee37a58999"
-BEZEL_LED_HANDLE = 0x0008   # single byte: brightness or LED UKP value
+BEZEL_CHAR_UUID  = "f62a9f56-f29e-48a8-a317-47ee37a58999"  # input+output characteristic
 
 DEFAULT_PLUGIN_IP = "127.0.0.1"
 DEFAULT_PFD_PORT  = 15683
@@ -143,18 +142,22 @@ class BezelClient:
             except Exception as e:
                 log.warning(f"{self.name}: pre-scan failed: {e}")
 
-        # Recreate client to ensure clean state
-        try:
-            if self.client.is_connected:
-                await self.client.disconnect()
-                await asyncio.sleep(1.0)
-            self.client = BleakClient(self.mac)
-        except Exception:
-            self.client = BleakClient(self.mac)
+        # On Linux, pre-scan to populate BlueZ device cache
+        if sys.platform != 'win32':
+            log.info(f"{self.name}: pre-scanning (3s)...")
+            try:
+                await asyncio.wait_for(
+                    BleakScanner.discover(timeout=3.0), timeout=5.0)
+            except Exception as e:
+                log.warning(f"{self.name}: pre-scan: {e}")
+            log.info(f"{self.name}: pre-scan done")
+
+        self.client = BleakClient(self.mac)
 
         # Retry loop — with timeout to prevent infinite hang
         for attempt in range(5):
             try:
+                log.info(f"{self.name}: connect attempt {attempt+1}/5...")
                 await asyncio.wait_for(self.client.connect(), timeout=10.0)
                 break
             except asyncio.TimeoutError:
@@ -163,7 +166,7 @@ class BezelClient:
                     self.client = BleakClient(self.mac)
                     await asyncio.sleep(2.0)
                 else:
-                    raise asyncio.TimeoutError(f"{self.name}: connect timed out after 5 attempts")
+                    raise asyncio.TimeoutError(f"{self.name}: connect timed out")
             except Exception as e:
                 log.warning(f"{self.name}: connect attempt {attempt+1}/5 failed: {e}")
                 if attempt < 4:
@@ -194,31 +197,45 @@ class BezelClient:
             log.info(f"{self.name}: disconnected")
 
     async def _write_led(self, value: int):
-        """Write a single byte to the LED control handle."""
+        """Write a single byte to the LED control characteristic."""
         try:
             await self.client.write_gatt_char(
-                BEZEL_LED_HANDLE, bytearray([value]), response=False)
+                BEZEL_CHAR_UUID, bytearray([value]), response=True)
         except Exception as e:
             log.debug(f"{self.name}: LED write failed: {e}")
 
     async def update_leds(self, brightness: int, leds: set):
-        """Push updated LED state to the bezel."""
+        """Push updated LED state to the bezel.
+
+        Brightness scale: 0x00=max bright, 0x40=off (bezel protocol is inverted).
+        LED bytes: write each active LED byte after brightness.
+        To turn LEDs off: write 0x00 (resets all) then rewrite brightness.
+        """
         if not self.client.is_connected:
             return
 
         b = max(0, min(64, brightness))
 
-        # Only update if something changed
         if b == self._last_brightness and leds == self._last_leds:
             return
 
-        # Reset then write new state
-        await self._write_led(0x00)
-        if b > 0:
-            await self._write_led(b)
-        for ukp in sorted(leds):
-            await self._write_led(ukp)
+        leds_changed = (leds != self._last_leds)
+        bright_changed = (b != self._last_brightness)
 
+        if leds_changed:
+            # Reset clears all LEDs (and sets full bright briefly)
+            await self._write_led(0x00)
+            # Rewrite brightness
+            await self._write_led(b)
+            # Write active LEDs
+            for led_byte in sorted(leds):
+                await self._write_led(led_byte)
+        elif bright_changed:
+            # Only brightness changed — no need to reset, just write new brightness
+            # But brightness write alone won't affect LEDs already on
+            await self._write_led(b)
+
+        log.info(f"{self.name}: brightness=0x{b:02x} leds={sorted(leds)}")
         self._last_brightness = b
         self._last_leds       = set(leds)
 
