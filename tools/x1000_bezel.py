@@ -8,14 +8,15 @@
 # Also receives LED state from the plugin on UDP :15684 and
 # writes brightness/LED bytes to the bezel via BLE.
 #
-# BLE LED protocol (handle 0x0008, single byte write):
-#   0x00        = reset (all LEDs off, backlight off)
-#   0x01-0x40   = backlight brightness (1=dim, 64=max)
-#   >0x40       = turn ON LED for button with that UKP release value
+# BLE LED protocol (decoded via Wireshark, August 2026):
+#   Brightness: 0x00=max bright, 0x40=off (INVERTED scale)
+#   LED ON:  write the LED's base byte (e.g. ADF=0x50)
+#   LED OFF: write base byte + 0x17 (e.g. ADF off = 0x67)
+#   No reset needed — each byte targets one LED independently.
 #
 # LED UDP packet from plugin (port 15684, binary):
-#   Byte 0:     brightness (0-64)
-#   Bytes 1..N: UKP release values for active button LEDs
+#   Byte 0:     brightness (inverted: 0x00=max, 0x40=off)
+#   Bytes 1..N: pre-computed BLE bytes (ON or OFF) for each tracked LED
 #
 # Requirements:
 #   pip install bleak --break-system-packages
@@ -84,7 +85,7 @@ class LEDReceiver:
     def __init__(self, port: int):
         self.port       = port
         self.brightness = 0
-        self.leds       = set()
+        self.leds       = []    # list of BLE bytes to write (ON or OFF per LED)
         self._sock      = None
 
     def start(self):
@@ -104,7 +105,7 @@ class LEDReceiver:
                 data, _ = self._sock.recvfrom(256)
                 if len(data) >= 1:
                     new_bright = data[0]
-                    new_leds   = set(data[1:])
+                    new_leds   = list(data[1:])
                     if new_bright != self.brightness or new_leds != self.leds:
                         self.brightness = new_bright
                         self.leds       = new_leds
@@ -129,7 +130,7 @@ class BezelClient:
         self.client       = BleakClient(mac)
         self._frame_count = 0
         self._last_brightness = -1
-        self._last_leds       = set()
+        self._last_leds       = []
 
     async def connect(self):
         log.info(f"{self.name}: connecting to {self.mac}...")
@@ -184,7 +185,7 @@ class BezelClient:
         # Reset LED state
         await self._write_led(0x00)
         self._last_brightness = -1
-        self._last_leds       = set()
+        self._last_leds       = []
 
     async def disconnect(self):
         if self.client.is_connected:
@@ -204,40 +205,31 @@ class BezelClient:
         except Exception as e:
             log.debug(f"{self.name}: LED write failed: {e}")
 
-    async def update_leds(self, brightness: int, leds: set):
-        """Push updated LED state to the bezel.
+    async def update_leds(self, brightness: int, led_bytes: list):
+        """Push LED state to the bezel.
 
-        Brightness scale: 0x00=max bright, 0x40=off (bezel protocol is inverted).
-        LED bytes: write each active LED byte after brightness.
-        To turn LEDs off: write 0x00 (resets all) then rewrite brightness.
+        Packet from plugin: byte 0 = brightness, bytes 1..N = BLE bytes to write.
+        Each byte is either an ON byte or OFF byte (ON + 0x17) for a specific LED.
+        Write each byte directly — no reset needed.
         """
         if not self.client.is_connected:
             return
 
-        b = max(0, min(64, brightness))
-
-        if b == self._last_brightness and leds == self._last_leds:
+        b = max(1, min(64, brightness))  # avoid 0x00 which is a reset command
+        changed = (b != self._last_brightness or led_bytes != self._last_leds)
+        if not changed:
             return
 
-        leds_changed = (leds != self._last_leds)
-        bright_changed = (b != self._last_brightness)
+        # Write brightness, then LED bytes, then brightness again
+        # The PFD bezel backlight gets dimmed by LED byte writes,
+        # so we rewrite brightness at the end to restore it.
+        await self._write_led(b)
+        for byte in led_bytes:
+            await self._write_led(byte)
+        await self._write_led(b)  # restore brightness after LED writes
 
-        if leds_changed:
-            # Reset clears all LEDs (and sets full bright briefly)
-            await self._write_led(0x00)
-            # Rewrite brightness
-            await self._write_led(b)
-            # Write active LEDs
-            for led_byte in sorted(leds):
-                await self._write_led(led_byte)
-        elif bright_changed:
-            # Only brightness changed — no need to reset, just write new brightness
-            # But brightness write alone won't affect LEDs already on
-            await self._write_led(b)
-
-        log.info(f"{self.name}: brightness=0x{b:02x} leds={sorted(leds)}")
         self._last_brightness = b
-        self._last_leds       = set(leds)
+        self._last_leds       = list(led_bytes)
 
     def _on_notification(self, handle, data: bytearray):
         for byte in data:
@@ -409,15 +401,15 @@ async def main(args):
                 c0 = clients[0].is_connected if clients else False
                 c1 = clients[1].is_connected if len(clients) > 1 else False
                 log.info(f"loop#{loop_count} PFD_conn={c0} MFD_conn={c1} "
-                         f"bright={led_rx.brightness} leds={sorted(led_rx.leds)} changed={changed}")
+                         f"bright={led_rx.brightness} leds={led_rx.leds} changed={changed}")
 
             # Push LED state to PFD bezel (has audio panel)
             if clients and clients[0].is_connected:
                 await clients[0].update_leds(led_rx.brightness, led_rx.leds)
 
-            # Push brightness only to MFD bezel
+            # Push brightness only to MFD bezel (no audio panel LEDs)
             if len(clients) > 1 and clients[1].is_connected:
-                await clients[1].update_leds(led_rx.brightness, set())
+                await clients[1].update_leds(led_rx.brightness, [])
 
             # Reconnect if disconnected
             for client in clients:

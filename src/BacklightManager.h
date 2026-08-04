@@ -1,9 +1,9 @@
 #pragma once
 // BacklightManager.h — Reads X-Plane datarefs and sends LED state to bezels.
 //
-// Sends a binary packet to x1000_bezel.py on port 15684:
-//   Byte 0:     brightness (0=off, 64=max)
-//   Bytes 1..N: UKP release values for active button LEDs
+// Wire format (plugin → x1000_bezel.py, port 15684, binary):
+//   Byte 0:     brightness (inverted: 0x00=max bright, 0x40=off)
+//   Bytes 1..N: BLE bytes to write — ON byte or OFF byte (ON+0x17) per LED
 
 #include "UDPSocket.h"
 #include <XPLMDataAccess.h>

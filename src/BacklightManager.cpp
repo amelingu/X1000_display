@@ -1,19 +1,19 @@
-// BacklightManager.cpp — Reads X-Plane autopilot / audio datarefs and
-// pushes LED state updates to x1000_bezel.py at 5 Hz.
+// BacklightManager.cpp — Reads X-Plane datarefs and pushes LED state to bezel.
 //
-// New wire format (plugin → x1000_bezel.py on port 15684, binary):
-//   Byte 0:     brightness (0=off, 64=max) — maps to X-Plane panel brightness
-//   Bytes 1..N: UKP release values for buttons whose LED should be ON
+// PROTOCOL (fully decoded via Wireshark, August 2026):
+//   Each LED has an ON byte and an OFF byte: OFF = ON + 0x17
+//   Brightness scale: 0x00=max bright, 0x40=off (INVERTED from intuition)
+//   No reset (0x00) needed — write ON or OFF byte directly.
 //
-// The bezel script writes brightness then each LED byte to BLE handle 0x0008.
+// LED ON bytes:
+//   COM1_MIC=0x43  COM2_MIC=0x44  COM3_MIC=0x45  COM_1/2=0x46
+//   COM1=0x47      COM2=0x48      SPKR=0x4c      MKR=0x4d
+//   HI_SENS=0x4e   DME=0x4f       ADF=0x50       NAV1=0x52
+//   NAV2=0x53      VOL=0x58       SQ=0x59
 //
-// Audio panel LED UKP release values (from Wireshark capture, July 2026):
-//   COM1/MIC=43  COM2/MIC=45  COM3/MIC=47
-//   COM1=51      COM2=53      COM3=55      COM1/2=49
-//   NAV1=131     NAV2=133     ADF=127      DME=125     AUX=129
-//   SPKR=119     MKR/MUTE=121 HI_SENS=123
-//   TEL=115      PA=117       MAN_SQ=135   PLAY=137
-//   PILOT=139    COPLT=141    DISPLAY_BACKUP=143
+// Wire format (plugin → x1000_bezel.py, port 15684, binary):
+//   Byte 0:     brightness (inverted: 0x00=max, 0x40=off)
+//   Bytes 1..N: BLE bytes to write — pre-computed ON or OFF for each LED
 
 #include "BacklightManager.h"
 #include "Platform.h"
@@ -22,29 +22,43 @@
 #include <cstdio>
 #include <cstring>
 #include <vector>
+#include <algorithm>
+
+// ---------------------------------------------------------------------------
+// LED byte constants
+// ---------------------------------------------------------------------------
+
+static constexpr uint8_t LED_OFF = 0x17;  // add to ON byte to get OFF byte
+
+static constexpr uint8_t LED_COM1_MIC = 0x43;
+static constexpr uint8_t LED_COM2_MIC = 0x44;
+static constexpr uint8_t LED_COM1     = 0x47;
+static constexpr uint8_t LED_COM2     = 0x48;
+static constexpr uint8_t LED_SPKR     = 0x4c;
+static constexpr uint8_t LED_MKR      = 0x4d;
+static constexpr uint8_t LED_DME      = 0x4f;
+static constexpr uint8_t LED_ADF      = 0x50;
+static constexpr uint8_t LED_NAV1     = 0x52;
+static constexpr uint8_t LED_NAV2     = 0x53;
+
+// ---------------------------------------------------------------------------
 
 static int readInt(XPLMDataRef dr) {
     return dr ? XPLMGetDatai(dr) : 0;
 }
 
-static float readFloat(XPLMDataRef dr) {
-    return dr ? XPLMGetDataf(dr) : 0.0f;
-}
-
-// ---------------------------------------------------------------------------
-
 bool BezelLights::operator==(const BezelLights& o) const {
-    return brightness    == o.brightness
-        && audio_com1    == o.audio_com1
-        && audio_com2    == o.audio_com2
-        && audio_nav1    == o.audio_nav1
-        && audio_nav2    == o.audio_nav2
-        && audio_adf1    == o.audio_adf1
-        && audio_dme1    == o.audio_dme1
-        && audio_mkr     == o.audio_mkr
-        && audio_mic1    == o.audio_mic1
-        && audio_mic2    == o.audio_mic2
-        && audio_spkr    == o.audio_spkr;
+    return brightness  == o.brightness
+        && audio_com1  == o.audio_com1
+        && audio_com2  == o.audio_com2
+        && audio_nav1  == o.audio_nav1
+        && audio_nav2  == o.audio_nav2
+        && audio_adf1  == o.audio_adf1
+        && audio_dme1  == o.audio_dme1
+        && audio_mkr   == o.audio_mkr
+        && audio_mic1  == o.audio_mic1
+        && audio_mic2  == o.audio_mic2
+        && audio_spkr  == o.audio_spkr;
 }
 
 // ---------------------------------------------------------------------------
@@ -53,33 +67,27 @@ BacklightManager::BacklightManager()
     : m_initialized(false), m_last_tick_time(0.0) {}
 
 void BacklightManager::init() {
-    // Audio panel datarefs
     auto fdr = [](const char* n) -> XPLMDataRef {
-        XPLMDataRef dr = XPLMFindDataRef(n);
-        return dr;
+        return XPLMFindDataRef(n);
     };
+
     m_refs.audio_sel_com1 = fdr("sim/cockpit2/radios/actuators/audio_selection_com1");
     m_refs.audio_sel_com2 = fdr("sim/cockpit2/radios/actuators/audio_selection_com2");
     m_refs.audio_sel_nav1 = fdr("sim/cockpit2/radios/actuators/audio_selection_nav1");
     m_refs.audio_sel_nav2 = fdr("sim/cockpit2/radios/actuators/audio_selection_nav2");
     m_refs.audio_sel_adf1 = fdr("sim/cockpit2/radios/actuators/audio_selection_adf1");
-    m_refs.audio_sel_dme1 = fdr("sim/cockpit2/radios/actuators/audio_selection_dme1");
+    m_refs.audio_sel_dme1 = fdr("sim/cockpit2/radios/actuators/audio_dme_enabled");
     m_refs.audio_spkr     = fdr("sim/cockpit2/radios/actuators/audio_speaker_enable");
     m_refs.audio_mkr      = fdr("sim/cockpit2/radios/actuators/audio_marker_enabled");
-    m_refs.audio_sel_dme1 = fdr("sim/cockpit2/radios/actuators/audio_dme_enabled");
     m_refs.audio_com_sel  = fdr("sim/cockpit2/radios/actuators/audio_com_selection");
-
-    // Panel brightness — 4th value of panel_brightness_ratio array (index 3)
-    // In C172, this follows the main panel brightness knob.
-    m_refs.panel_bright = XPLMFindDataRef(
-        "sim/cockpit2/electrical/panel_brightness_ratio");
-    if (!m_refs.panel_bright)
-        XPLMDebugString("[X1000] BacklightManager: panel brightness dataref not found\n");
+    m_refs.panel_bright   = fdr("sim/cockpit2/electrical/panel_brightness_ratio");
 
     if (!m_refs.audio_sel_com1)
         XPLMDebugString("[X1000] BacklightManager: audio COM dataref not found\n");
     if (!m_refs.audio_com_sel)
         XPLMDebugString("[X1000] BacklightManager: audio MIC dataref not found\n");
+    if (!m_refs.panel_bright)
+        XPLMDebugString("[X1000] BacklightManager: panel brightness dataref not found\n");
 
     m_initialized = true;
     XPLMDebugString("[X1000] BacklightManager: initialised\n");
@@ -103,61 +111,56 @@ BezelLights BacklightManager::readPFDLights() {
     l.audio_mic1 = (mic_sel == 6);
     l.audio_mic2 = (mic_sel == 7);
 
-    // Read 4th value (index 3) of panel_brightness_ratio array → 0-64 bezel scale
+    // Brightness: inverted scale (0x00=max bright, 0x40=off)
+    // panel_brightness_ratio[3]: 0.0=off → 0x40, 1.0=max → 0x00
     float bright = 0.0f;
-    if (m_refs.panel_bright) {
+    if (m_refs.panel_bright)
         XPLMGetDatavf(m_refs.panel_bright, &bright, 3, 1);
-    }
-    // Brightness is INVERTED: 0x00=max bright, 0x40(64)=off
-    // panel_brightness_ratio: 0.0=off, 1.0=max → invert to bezel scale
-    l.brightness = (uint8_t)((1.0f - bright) * 64.0f);
+    // Clamp to 1 minimum — 0x00 is a reset command, not "max brightness"
+    l.brightness = (uint8_t)std::max(1.0f, (1.0f - bright) * 64.0f);
 
     return l;
 }
 
 BezelLights BacklightManager::readMFDLights() {
-    // MFD has no audio panel — just brightness
     BezelLights l;
     float bright = 0.0f;
-    if (m_refs.panel_bright) {
+    if (m_refs.panel_bright)
         XPLMGetDatavf(m_refs.panel_bright, &bright, 3, 1);
-    }
-    // Brightness is INVERTED: 0x00=max bright, 0x40(64)=off
-    // panel_brightness_ratio: 0.0=off, 1.0=max → invert to bezel scale
-    l.brightness = (uint8_t)((1.0f - bright) * 64.0f);
+    // Clamp to 1 minimum — 0x00 is a reset command, not "max brightness"
+    l.brightness = (uint8_t)std::max(1.0f, (1.0f - bright) * 64.0f);
     return l;
 }
 
 // ---------------------------------------------------------------------------
-// Serialise to binary LED state packet
-// Format: 1 byte brightness + N bytes of active LED UKP values
+// Serialise — brightness byte + ON/OFF byte for each tracked LED
+// The bezel script writes each byte directly to BLE, no reset needed.
 // ---------------------------------------------------------------------------
 
-static std::string serialiseBinary(const BezelLights& l, bool include_audio) {
+static void pushLED(std::vector<uint8_t>& p, uint8_t on_byte, bool active) {
+    p.push_back(active ? on_byte : (on_byte + LED_OFF));
+}
+
+static std::string serialise(const BezelLights& l, bool include_audio) {
     std::vector<uint8_t> packet;
     packet.push_back(l.brightness);
 
     if (include_audio) {
-        // Audio panel LED bytes (discovered via systematic BLE scan, July 2026)
-        // Brightness scale: 0x00=max bright, 0x40=off (INVERTED)
-        // LED bytes: write byte to turn ON that specific LED
-        if (l.audio_mic1) packet.push_back(0x43);  // COM1/MIC
-        if (l.audio_mic2) packet.push_back(0x44);  // COM2/MIC
-        if (l.audio_com1) packet.push_back(0x47);  // COM1 monitor
-        if (l.audio_com2) packet.push_back(0x48);  // COM2 monitor
-        if (l.audio_nav1) packet.push_back(0x52);  // NAV1
-        if (l.audio_nav2) packet.push_back(0x53);  // NAV2
-        if (l.audio_adf1) packet.push_back(0x50);  // ADF
-        if (l.audio_dme1) packet.push_back(0x4f);  // DME
-        if (l.audio_mkr)  packet.push_back(0x4d);  // MKR/MUTE
-        if (l.audio_spkr) packet.push_back(0x4c);  // SPKR
+        pushLED(packet, LED_COM1_MIC, l.audio_mic1);
+        pushLED(packet, LED_COM2_MIC, l.audio_mic2);
+        pushLED(packet, LED_COM1,     l.audio_com1);
+        pushLED(packet, LED_COM2,     l.audio_com2);
+        pushLED(packet, LED_NAV1,     l.audio_nav1);
+        pushLED(packet, LED_NAV2,     l.audio_nav2);
+        pushLED(packet, LED_ADF,      l.audio_adf1);
+        pushLED(packet, LED_DME,      l.audio_dme1);
+        pushLED(packet, LED_MKR,      l.audio_mkr);
+        pushLED(packet, LED_SPKR,     l.audio_spkr);
     }
 
     return std::string(reinterpret_cast<const char*>(packet.data()), packet.size());
 }
 
-// ---------------------------------------------------------------------------
-// Tick — called from flight loop at ~5 Hz
 // ---------------------------------------------------------------------------
 
 void BacklightManager::tick(UDPSocket& sock,
@@ -170,24 +173,26 @@ void BacklightManager::tick(UDPSocket& sock,
     if ((t - m_last_tick_time) < TICK_INTERVAL) return;
     m_last_tick_time = t;
 
-    // PFD (includes audio panel LEDs)
     BezelLights pfd = readPFDLights();
     if (pfd != m_last_pfd) {
-        std::string msg = serialiseBinary(pfd, /*include_audio=*/true);
+        std::string msg = serialise(pfd, true);
         sock.send(msg, pfd_ip, send_port);
-        // Debug: log what we sent
-        char dbuf[128];
+        char dbuf[80];
         snprintf(dbuf, sizeof(dbuf),
-                 "[X1000] BL: PFD brightness=%d leds=%zu\n",
-                 (int)pfd.brightness, msg.size() - 1);
+                 "[X1000] BL: brightness=%d audio=%d%d%d%d%d%d%d%d%d%d\n",
+                 (int)pfd.brightness,
+                 pfd.audio_mic1, pfd.audio_mic2,
+                 pfd.audio_com1, pfd.audio_com2,
+                 pfd.audio_nav1, pfd.audio_nav2,
+                 pfd.audio_adf1, pfd.audio_dme1,
+                 pfd.audio_mkr,  pfd.audio_spkr);
         XPLMDebugString(dbuf);
         m_last_pfd = pfd;
     }
 
-    // MFD (brightness only)
     BezelLights mfd = readMFDLights();
     if (mfd != m_last_mfd) {
-        std::string msg = serialiseBinary(mfd, /*include_audio=*/false);
+        std::string msg = serialise(mfd, false);
         sock.send(msg, mfd_ip, send_port);
         m_last_mfd = mfd;
     }
