@@ -182,8 +182,13 @@ class BezelClient:
         await self.client.start_notify(BEZEL_CHAR_UUID, self._on_notification)
         log.info(f"{self.name}: subscribed to button notifications")
 
-        # Reset LED state
-        await self._write_led(0x00)
+        # Reset bezel and audio panel to default state:
+        # write 0x00 three times — resets brightness to max, all LEDs off.
+        # Audio panel (connected via EXT. PORT) also resets.
+        for _ in range(3):
+            await self._write_led(0x00)
+            await asyncio.sleep(0.05)
+        log.info(f"{self.name}: reset complete (full bright, all LEDs off)")
         self._last_brightness = -1
         self._last_leds       = []
 
@@ -220,13 +225,12 @@ class BezelClient:
         if not changed:
             return
 
-        # Write brightness, then LED bytes, then brightness again
-        # The PFD bezel backlight gets dimmed by LED byte writes,
-        # so we rewrite brightness at the end to restore it.
-        await self._write_led(b)
+        # Write LED bytes first, then brightness last.
+        # The PFD bezel resets brightness on each write, so brightness
+        # must be the final byte to take effect correctly.
         for byte in led_bytes:
             await self._write_led(byte)
-        await self._write_led(b)  # restore brightness after LED writes
+        await self._write_led(b)
 
         self._last_brightness = b
         self._last_leds       = list(led_bytes)
