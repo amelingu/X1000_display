@@ -1,0 +1,19 @@
+cat > /tmp/ukp_monitor.py << 'EOF'
+import socket, sys
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+port = int(sys.argv[1]) if len(sys.argv) > 1 else 15683
+sock.bind(('0.0.0.0', port))
+print(f"Listening on :{port} — press buttons on the bezel...")
+print("UKP  | even=press, odd=release")
+print("-" * 30)
+while True:
+    data, _ = sock.recvfrom(256)
+    msg = data.decode('utf-8', errors='ignore').strip()
+    if 'UKP=' in msg:
+        ukp = int(msg.split('UKP=')[1])
+        kind = 'PRESS  ' if ukp % 2 == 0 else 'release'
+        print(f"UKP {ukp:4d}  {kind}")
+EOF
+python3 /tmp/ukp_monitor.py 15683

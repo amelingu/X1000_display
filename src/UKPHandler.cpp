@@ -110,7 +110,7 @@ static std::unordered_map<uint32_t, CmdPair> buildMap() {
 
     // COM vol push, standby flip, dual knob push
     m[206] = { "sim/GPS/g1000n1_cvol",      "" };
-    m[202] = { "sim/GPS/g1000n1_com_ff",    "" };
+    // UKP 202/203 = COM flip-flop — handled via CommandBegin/End in handle()
     m[110] = { "sim/GPS/g1000n1_com12",     "" };
 
     // HDG knob push (sync), CRS knob push (sync)
@@ -134,8 +134,7 @@ static std::unordered_map<uint32_t, CmdPair> buildMap() {
     m[184] = { "sim/GPS/g1000n1_menu",      "sim/GPS/g1000n3_menu"      };
     m[212] = { "sim/GPS/g1000n1_fpl",       "sim/GPS/g1000n3_fpl"       };
     m[182] = { "sim/GPS/g1000n1_proc",      "sim/GPS/g1000n3_proc"      };
-    // CLR fires on release (odd), not press (even)
-    m[215] = { "sim/GPS/g1000n1_clr",       "sim/GPS/g1000n3_clr"       };  // CLR release
+    // UKP 214/215 = CLR — handled via CommandBegin/End (supports short/long press)
     m[180] = { "sim/GPS/g1000n1_ent",       "sim/GPS/g1000n3_ent"       };
     m[190] = { "sim/GPS/g1000n1_cursor",    "sim/GPS/g1000n3_cursor"    };
 
@@ -179,6 +178,7 @@ static std::unordered_map<uint32_t, CmdPair> buildMap() {
     // FMS outer / inner — both sides
     m[40]  = { "sim/GPS/g1000n1_fms_outer_up",   "sim/GPS/g1000n3_fms_outer_up"   };
     m[41]  = { "sim/GPS/g1000n1_fms_outer_down",  "sim/GPS/g1000n3_fms_outer_down" };
+    m[42]  = { "sim/audio_panel/transmit_audio_com1", "" };  // COM1/MIC press
     m[38]  = { "sim/GPS/g1000n1_fms_inner_up",   "sim/GPS/g1000n3_fms_inner_up"   };
     m[39]  = { "sim/GPS/g1000n1_fms_inner_down",  "sim/GPS/g1000n3_fms_inner_down" };
 
@@ -213,7 +213,7 @@ static std::unordered_map<uint32_t, CmdPair> buildMap() {
     //
     // Audio panel buttons send only the release (odd) value — map those
     // MIC select buttons
-    m[43]  = { "sim/GPS/g1000n1_com1_mic",        "" };  // COM1/MIC release
+    // UKP 43 = COM1/MIC release — handled by AudioPanelManager
     m[45]  = { "sim/GPS/g1000n1_com2_mic",        "" };  // COM2/MIC release
     m[47]  = { "sim/GPS/g1000n1_com3_mic",        "" };  // COM3/MIC release
     // COM monitor buttons
@@ -344,6 +344,10 @@ static constexpr int N_HOLD_KEYS = 6;
 // Cursor keys start at index 2 — these get acceleration
 static constexpr int CURSOR_KEY_START = 2;
 
+// COM flip-flop state (file scope so tick() can access it)
+static double s_com_ff_press_time = 0.0;
+static bool   s_com_ff_long_fired = false;
+
 static bool handleHoldKey(uint32_t ukp, BezelSide side) {
     for (int i = 0; i < N_HOLD_KEYS; ++i) {
         auto& k = s_hold_keys[i];
@@ -379,23 +383,20 @@ void UKPHandler::handle(uint32_t ukp, BezelSide side) {
         return;
     }
 
-    // MFD CLR press (214) — force MFD to NAV full screen, but only when
-    // DISPLAY BACKUP is OFF (MFD is in normal mode, not showing backup PFD)
-    if (side == BezelSide::MFD && ukp == 214) {
-        XPLMDataRef rev_dr = XPLMFindDataRef("sim/cockpit2/EFIS/G1000_reversionary_mode");
-        bool backup_active = false;
-        if (rev_dr) {
-            int vals[2] = {0, 0};
-            XPLMGetDatavi(rev_dr, vals, 0, 2);
-            backup_active = (vals[0] || vals[1]);
-        }
-        if (!backup_active) {
-            XPLMDataRef page_dr = XPLMFindDataRef("sim/cockpit/g1000/g1000_n2_page");
-            if (page_dr) {
-                XPLMSetDatai(page_dr, 0);
-                XPLMDebugString("[X1000] MFD CLR held — forced to NAV full screen\n");
-            }
-        }
+    // CLR press/release — CommandBegin/Continue/End lets X-Plane handle
+    // short press (clear entry) vs long press (return to NAV page)
+    if (ukp == 214) {
+        const char* cmd = (side == BezelSide::MFD)
+                          ? "sim/GPS/g1000n3_clr" : "sim/GPS/g1000n1_clr";
+        XPLMCommandRef ref = XPLMFindCommand(cmd);
+        if (ref) XPLMCommandBegin(ref);
+        return;
+    }
+    if (ukp == 215) {
+        const char* cmd = (side == BezelSide::MFD)
+                          ? "sim/GPS/g1000n3_clr" : "sim/GPS/g1000n1_clr";
+        XPLMCommandRef ref = XPLMFindCommand(cmd);
+        if (ref) XPLMCommandEnd(ref);
         return;
     }
     if (!m_initialized) return;
@@ -409,8 +410,8 @@ void UKPHandler::handle(uint32_t ukp, BezelSide side) {
                      "sim/GPS/g1000n1_hdg_up", "sim/GPS/g1000n1_hdg_down");
             return;
         }
-        if (ukp == 74 || ukp == 75) {
-            tickKnob(crs_filter, ukp == 74,
+        if (ukp == 104 || ukp == 105) {
+            tickKnob(crs_filter, ukp == 104,
                      "sim/GPS/g1000n1_crs_up", "sim/GPS/g1000n1_crs_down");
             return;
         }
@@ -421,11 +422,28 @@ void UKPHandler::handle(uint32_t ukp, BezelSide side) {
                      "sim/GPS/g1000n3_hdg_up", "sim/GPS/g1000n3_hdg_down");
             return;
         }
-        if (ukp == 74 || ukp == 75) {
-            tickKnob(mfd_crs_filter, ukp == 74,
+        if (ukp == 104 || ukp == 105) {
+            tickKnob(mfd_crs_filter, ukp == 104,
                      "sim/GPS/g1000n3_crs_up", "sim/GPS/g1000n3_crs_down");
             return;
         }
+    }
+
+    // COM flip-flop: use CommandBegin/Continue/End to convey press duration
+    // Short press (<500ms): simple COM swap
+    // Long press (>=500ms): open frequency list (X-Plane interprets hold duration)
+    if (ukp == 202) {  // press
+        s_com_ff_press_time = Platform::now_seconds();
+        s_com_ff_long_fired = false;
+        XPLMCommandRef ref = XPLMFindCommand("sim/GPS/g1000n1_com_ff");
+        if (ref) XPLMCommandBegin(ref);
+        return;
+    }
+    if (ukp == 203) {  // release
+        XPLMCommandRef ref = XPLMFindCommand("sim/GPS/g1000n1_com_ff");
+        if (ref) XPLMCommandEnd(ref);
+        s_com_ff_press_time = 0.0;
+        return;
     }
 
     auto it = s_map.find(ukp);
@@ -458,6 +476,11 @@ void UKPHandler::fireCommand(const char* cmd_name) {
 
 void UKPHandler::tick() {
     double now = Platform::now_seconds();
+
+    // COM flip-flop: send CommandContinue while held
+    // Note: CommandContinue is sent by the flight loop while button is held.
+    // s_com_ff_press_time is reset to 0 on UKP 203 (release).
+
     for (int i = 0; i < N_HOLD_KEYS; ++i) {
         auto& k = s_hold_keys[i];
         if (!k.held) continue;

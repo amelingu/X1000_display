@@ -69,5 +69,5 @@ private:
     bool        m_initialized;
     double      m_last_tick_time;
 
-    static constexpr double TICK_INTERVAL = 0.2;   // 5 Hz
+    static constexpr double TICK_INTERVAL = 0.067; // 15 Hz
 };

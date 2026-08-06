@@ -184,7 +184,6 @@ class BezelClient:
 
         # Reset bezel and audio panel to default state:
         # write 0x00 three times — resets brightness to max, all LEDs off.
-        # Audio panel (connected via EXT. PORT) also resets.
         for _ in range(3):
             await self._write_led(0x00)
             await asyncio.sleep(0.05)
@@ -394,26 +393,26 @@ async def main(args):
     loop_count = 0
     try:
         while True:
-            await asyncio.sleep(0.2)   # 5Hz
+            await asyncio.sleep(0.067)  # 15Hz
             loop_count += 1
 
             # Poll LED state from plugin
             changed = led_rx.poll()
 
             # Log status every 5s (25 iterations)
-            if loop_count % 25 == 1:
+            if loop_count % 75 == 1:
                 c0 = clients[0].is_connected if clients else False
                 c1 = clients[1].is_connected if len(clients) > 1 else False
                 log.info(f"loop#{loop_count} PFD_conn={c0} MFD_conn={c1} "
                          f"bright={led_rx.brightness} leds={led_rx.leds} changed={changed}")
 
-            # Push LED state to PFD bezel (has audio panel)
-            if clients and clients[0].is_connected:
-                await clients[0].update_leds(led_rx.brightness, led_rx.leds)
-
-            # Push brightness only to MFD bezel (no audio panel LEDs)
+            # Push brightness to MFD first (no LED bytes — fast)
             if len(clients) > 1 and clients[1].is_connected:
                 await clients[1].update_leds(led_rx.brightness, [])
+
+            # Push LED state to PFD bezel (has audio panel + LED bytes)
+            if clients and clients[0].is_connected:
+                await clients[0].update_leds(led_rx.brightness, led_rx.leds)
 
             # Reconnect if disconnected
             for client in clients:
