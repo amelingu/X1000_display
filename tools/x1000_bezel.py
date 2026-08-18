@@ -143,8 +143,20 @@ class BezelClient:
             except Exception as e:
                 log.warning(f"{self.name}: pre-scan failed: {e}")
 
-        # On Linux, pre-scan to populate BlueZ device cache
+        # On Linux: use bluetoothctl to force-disconnect any stale BlueZ session
+        # from a previous plugin run. Without this, the bezel refuses new
+        # connections and times out on every X-Plane restart.
         if sys.platform != 'win32':
+            import subprocess
+            log.info(f"{self.name}: disconnecting stale BLE session via bluetoothctl...")
+            try:
+                subprocess.run(
+                    ["bluetoothctl", "disconnect", self.mac],
+                    timeout=5, capture_output=True)
+                await asyncio.sleep(2.0)  # give BlueZ time to release
+            except Exception as e:
+                log.warning(f"{self.name}: bluetoothctl disconnect: {e}")
+            # Pre-scan to populate BlueZ device cache
             log.info(f"{self.name}: pre-scanning (3s)...")
             try:
                 await asyncio.wait_for(
@@ -178,9 +190,14 @@ class BezelClient:
 
         log.info(f"{self.name}: connected")
 
-        # Subscribe to button notifications
-        await self.client.start_notify(BEZEL_CHAR_UUID, self._on_notification)
-        log.info(f"{self.name}: subscribed to button notifications")
+        # Subscribe to button notifications.
+        # This is critical — if start_notify fails silently, buttons won't work.
+        try:
+            await self.client.start_notify(BEZEL_CHAR_UUID, self._on_notification)
+            log.info(f"{self.name}: subscribed to button notifications")
+        except Exception as e:
+            log.error(f"{self.name}: start_notify FAILED: {e} — buttons will not work!")
+            raise  # force reconnect attempt
 
         # Reset bezel and audio panel to default state:
         # write 0x00 three times — resets brightness to max, all LEDs off.
