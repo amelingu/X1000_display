@@ -80,7 +80,7 @@ void BacklightManager::init() {
     m_refs.audio_spkr     = fdr("sim/cockpit2/radios/actuators/audio_speaker_enable");
     m_refs.audio_mkr      = fdr("sim/cockpit2/radios/actuators/audio_marker_enabled");
     m_refs.audio_com_sel  = fdr("sim/cockpit2/radios/actuators/audio_com_selection");
-    m_refs.panel_bright   = fdr("sim/cockpit2/electrical/panel_brightness_ratio");
+    m_refs.panel_bright   = fdr("sim/cockpit2/switches/instrument_brightness_ratio");
 
     if (!m_refs.audio_sel_com1)
         XPLMDebugString("[X1000] BacklightManager: audio COM dataref not found\n");
@@ -112,10 +112,10 @@ BezelLights BacklightManager::readPFDLights() {
     l.audio_mic2 = (mic_sel == 7);
 
     // Brightness: inverted scale (0x00=max bright, 0x40=off)
-    // panel_brightness_ratio[3]: 0.0=off → 0x40, 1.0=max → 0x00
+    // panel_brightness_ratio[0]: 0.0=off → 0x40, 1.0=max → 0x00
     float bright = 0.0f;
     if (m_refs.panel_bright)
-        XPLMGetDatavf(m_refs.panel_bright, &bright, 3, 1);
+        XPLMGetDatavf(m_refs.panel_bright, &bright, 0, 1);
     // Clamp to 1 minimum — 0x00 is a reset command, not "max brightness"
     l.brightness = (uint8_t)std::max(1.0f, (1.0f - bright) * 64.0f);
 
@@ -126,7 +126,7 @@ BezelLights BacklightManager::readMFDLights() {
     BezelLights l;
     float bright = 0.0f;
     if (m_refs.panel_bright)
-        XPLMGetDatavf(m_refs.panel_bright, &bright, 3, 1);
+        XPLMGetDatavf(m_refs.panel_bright, &bright, 0, 1);
     // Clamp to 1 minimum — 0x00 is a reset command, not "max brightness"
     l.brightness = (uint8_t)std::max(1.0f, (1.0f - bright) * 64.0f);
     return l;
