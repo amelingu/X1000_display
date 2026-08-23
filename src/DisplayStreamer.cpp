@@ -255,8 +255,11 @@ bool DisplayStreamer::acquireHandles() {
         return false;
     }
 
+    // Check avionics binding — limit attempts and sleep time to avoid
+    // blocking the flight loop when a non-G1000 aircraft is loaded.
+    // The Plugin.cpp retry loop (30s backoff) handles repeated attempts.
     int pfd_bound = 0, mfd_bound = 0;
-    for (int i = 0; i < 10; ++i) {
+    for (int i = 0; i < 3; ++i) {
         pfd_bound = XPLMIsAvionicsBound(m_pfd_handle);
         mfd_bound = XPLMIsAvionicsBound(m_mfd_handle);
         char buf[96];
@@ -265,7 +268,7 @@ bool DisplayStreamer::acquireHandles() {
                  i+1, pfd_bound, mfd_bound);
         XPLMDebugString(buf);
         if (pfd_bound && mfd_bound) break;
-        usleep(200000);
+        usleep(100000);  // 100ms — max 300ms total block
     }
     if (!pfd_bound || !mfd_bound) {
         XPLMDebugString("[X1000] G1000 not bound — load a G1000 aircraft.\n");

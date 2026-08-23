@@ -138,10 +138,13 @@ static float flightLoopCB(float /*elapsed*/, float /*flightLoop*/, int /*count*/
     // Encode and push display frames
     if (g_display) g_display->tick();
 
-    // Auto-retry display init if G1000 wasn't bound at startup
+    // Auto-retry display init if G1000 wasn't bound at startup.
+    // After a failed attempt (G1000 not found), wait 30s before retrying
+    // to avoid blocking the flight loop when a non-G1000 aircraft is loaded.
     if (s_display_init_pending && (!g_display || !g_display->isReady())) {
         double t = Platform::now_seconds();
-        if (t - s_last_retry_time >= 2.0) {
+        double retry_interval = (s_last_retry_time == 0.0) ? 2.0 : 30.0;
+        if (t - s_last_retry_time >= retry_interval) {
             s_last_retry_time = t;
             initDisplay();
             if (g_display && g_display->isReady()) {
