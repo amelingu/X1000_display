@@ -16,6 +16,7 @@ Designed for use with **Simionic SHB1000S** bezels and two iPads as screens, pro
 - **Live G1000 PFD/MFD mirroring** — captured via OpenGL draw callbacks, JPEG-encoded and streamed to Safari on iPads at ~15fps with ~30–50ms latency
 - **Brightness sync** — iPad image brightness tracks `sim/cockpit2/electrical/display_screen_brightness` in real time
 - **Minimal FPS impact** — async GPU readback (PBO) + background encode thread; ~4fps hit at LFPG
+- **Smart init** — plugin detects whether the loaded aircraft has G1000 avionics and whether the screens are popped out; no performance impact when flying non-G1000 aircraft
 
 ### Bezel Input (SHB1000S via Bluetooth LE)
 - **Full PFD button/knob map** — all G1000 PFD functions (`g1000n1_*`)
@@ -24,22 +25,21 @@ Designed for use with **Simionic SHB1000S** bezels and two iPads as screens, pro
 - **Fast spin detection** — heading/course knobs fire 10 commands per click when spinning fast, with direction noise filtering
 - **Hold-repeat** — NOSE UP/DOWN and FMS cursor keys repeat while held (0.5s delay, then 5Hz)
 - **Cursor acceleration** — FMS cursor keys accelerate from 5/sec to 20/sec the longer they are held
-- **CLR on release** — CLR fires on button release, not press, to prevent accidental activations
-- **MFD CLR long press** — forces MFD to full-screen NAV page (when display backup is off)
+- **COM flip-flop long press** — short press swaps active/standby; long press (≥500ms) sets emergency frequency 121.500MHz (via `XPLMCommandBegin`/`Continue`/`End`)
+- **CLR short/long press** — short press clears entry; long press returns to NAV page (via `XPLMCommandBegin`/`Continue`/`End`)
 - **Display backup switch** — stable ON/OFF switch controlling `G1000_display_reversion`
 - **Auto BLE reconnect** — bezels reconnect automatically between X-Plane sessions
 
 ### Bezel LED Control
-- **Backlight brightness** — PFD and MFD bezel backlights (and audio panel backlight) track X-Plane panel brightness in real time
+- **Backlight brightness** — PFD and MFD bezel backlights (and audio panel backlight) track X-Plane `instrument_brightness_ratio` in real time
 - **Audio panel button LEDs** — COM1/2 monitor, COM1/2 MIC, NAV1/2, ADF, DME, MKR/MUTE, SPKR LEDs reflect actual X-Plane audio selection state
-- **Protocol** — reverse-engineered via nRF52840 Wireshark capture: single-byte BLE writes to handle `0x0008` (0x01–0x40 = brightness, >0x40 = button LED UKP value)
+- **Protocol** — fully reverse-engineered via nRF52840 Wireshark capture (July–August 2026): each LED has an ON byte and an OFF byte (`OFF = ON + 0x17`); brightness scale is inverted (`0x00` = max bright, `0x40` = off)
 
 ### Plugin Infrastructure
 - **Auto relay launch** — display relay and bezel BLE bridge start/stop with the plugin
 - **In-sim UI** — floating settings window (Plugins → X1000 Display → Settings) with live status, bezel MAC configuration, BLE scan with auto PFD detection
 - **Bezel scan** — click Scan BLE, press 3 buttons on PFD bezel → both bezels auto-assigned and connected without restart
 - **Persistent settings** — saved to `X1000_display.ini` at plugin root (shared across platforms)
-- **Auto-retry display init** — waits for G1000 avionics to bind after aircraft load
 - **Cross-platform** — Linux ✅, Windows 10 ✅, macOS ⏳
 
 ---
@@ -57,24 +57,25 @@ X-Plane G1000 draw callback
 tools/x1000_bezel.py (bleak BLE, standalone process)   ← auto-launched by plugin
   → connects to SHB1000S bezel(s) via Bluetooth LE
   INPUT:  BLE notifications → UKP bytes → UDP :15683 (PFD) / :15685 (MFD)
-          → ConnectionManager → UKPHandler → XPLMCommandOnce
+          → ConnectionManager → UKPHandler → XPLMCommandBegin/Continue/End
           → AudioPanelManager → XPLMCommandOnce / XPLMSetDatai
   OUTPUT: UDP :15684 ← plugin binary LED state packet
-          → BLE write to handle 0x0008 (single byte: brightness or LED UKP)
+          → BLE write (single byte per LED: ON byte or OFF byte)
 ```
 
-**BLE LED protocol** (reverse-engineered via nRF52840 Wireshark capture, July 2026):
+**BLE LED protocol** (fully decoded via nRF52840 Wireshark capture, August 2026):
 
-| Value | Effect |
+| Byte value | Effect |
 |---|---|
-| `0x00` | Reset — all LEDs off, backlight off |
-| `0x01–0x40` | Backlight brightness (1=dim, 64=max) |
-| `>0x40` | Turn ON LED for button with that UKP release value |
+| `0x00` | Reset — all LEDs off, max brightness (avoid — use `0x01` minimum) |
+| `0x01–0x40` | Backlight brightness — **inverted**: `0x01`=max bright, `0x40`=off |
+| ON byte (`0x43`–`0x59`) | Turn ON specific LED |
+| OFF byte (`ON + 0x17`) | Turn OFF specific LED |
 
 **Plugin → bezel script LED packet** (binary UDP on port 15684):
 ```
-Byte 0:     brightness (0–64)
-Bytes 1..N: UKP release values for active button LEDs
+Byte 0:     brightness (inverted: 0x01=max bright, 0x40=off)
+Bytes 1..N: pre-computed BLE bytes — ON byte or OFF byte for each tracked LED
 ```
 
 **Key design decisions:**
@@ -83,6 +84,7 @@ Bytes 1..N: UKP release values for active button LEDs
 - PBO double-buffering eliminates GPU readback stall
 - JPEG encode happens on a background thread — render thread cost is negligible
 - Single ini file at plugin root shared by all platform binaries
+- Plugin detects non-G1000 aircraft instantly (no blocking loop) and stops retrying
 
 ---
 
@@ -91,7 +93,7 @@ Bytes 1..N: UKP release values for active button LEDs
 ```
 X1000_display/
 ├── src/                          C++ plugin source
-│   ├── Plugin.cpp                Entry points, flight loop, auto-retry
+│   ├── Plugin.cpp                Entry points, flight loop, G1000 detection, auto-retry
 │   ├── Platform.h/.cpp           Cross-platform: GL, sockets, process spawn, timing
 │   ├── DisplayStreamer.h/.cpp    G1000 capture, PBO, JPEG, brightness, UDP push
 │   ├── SettingsManager.h/.cpp    INI persistence, IP detection
@@ -106,9 +108,10 @@ X1000_display/
 ├── tools/
 │   ├── x1000_relay.py            Python WebSocket relay (stdlib only, no pip needed)
 │   └── x1000_bezel.py            BLE bezel bridge — input + LED output (requires bleak)
-├── X1000Viewer/                  Native iOS app (Swift) — in progress
 ├── docs/
+│   ├── led_sandbox.py            Standalone LED control test script (requires bleak)
 │   └── bezel SHB1000S.txt        SHB1000S hardware reference notes
+├── X1000Viewer/                  Native iOS app (Swift) — in progress
 ├── SDK/                          ← download from developer.x-plane.com (not in repo)
 │   ├── CHeaders/XPLM/
 │   ├── CHeaders/Widgets/
@@ -140,13 +143,16 @@ X1000_display/
 | PFD bezel input — all buttons/knobs | ✅ Working |
 | MFD bezel input — all buttons/knobs | ✅ Working |
 | Audio panel — COM/NAV/ADF/DME/MKR | ✅ Working |
+| COM flip-flop short/long press | ✅ Working |
+| CLR short/long press | ✅ Working |
 | Fast spin knob filter + 10x batch | ✅ Working |
 | Hold-repeat (NOSE UP/DOWN, cursor) | ✅ Working |
 | Cursor key acceleration | ✅ Working |
 | Display backup switch | ✅ Working |
-| Bezel auto-reconnect | ✅ Working |
-| Bezel/audio panel backlight control | ✅ Implemented (untested end-to-end) |
-| Audio panel button LED control | ✅ Implemented (untested end-to-end) |
+| Bezel auto-reconnect between sessions | ✅ Working |
+| Bezel/audio panel backlight control | ✅ Working |
+| Audio panel button LED control | ✅ Working |
+| Non-G1000 aircraft: no performance impact | ✅ Working |
 | X1000Viewer iOS app | 🔧 In progress |
 
 ---
@@ -317,7 +323,7 @@ All three platform binaries coexist in the same folder and share the same ini fi
 
 1. Start X-Plane and load a G1000 aircraft (default Cessna 172 SP)
 2. Pop out the G1000 PFD and MFD windows (right-click → Pop Out)
-3. The relay starts automatically — check **Plugins → X1000 Display → Settings**
+3. The relay starts automatically — check **Plugins → X1000 Display → Settings** for the PC IP address
 4. On PFD iPad: open Safari → `http://<PC_IP>:8080/`
 5. On MFD iPad: open Safari → `http://<PC_IP>:8081/`
 6. Tap **Share → Add to Home Screen** on each iPad
@@ -326,6 +332,10 @@ All three platform binaries coexist in the same folder and share the same ini fi
 
 The PC IP is auto-detected and shown in the plugin's settings window.
 For a better experience (hidden status bar, true full screen) use the **X1000Viewer** iOS app.
+
+**To test the stream on the X-Plane PC itself** (no iPad needed):
+- PFD: `http://127.0.0.1:8080/`
+- MFD: `http://127.0.0.1:8081/`
 
 ---
 
@@ -358,9 +368,9 @@ pip install bleak --break-system-packages
 
 ### Running alongside the Simionic plugin
 
-Running X1000_display and the Simionic plugin simultaneously is not supported — both plugins use UDP port 15683/15685 for bezel input, causing a bind conflict that prevents X1000_display from receiving bezel button presses. The Bluetooth adapter conflict (bleak vs Simionic) also prevents BLE connections.
+Running X1000_display and the Simionic plugin simultaneously is not supported — both plugins use UDP ports 15683/15685 for bezel input, causing a bind conflict. The Bluetooth adapter is also shared and may conflict.
 
-If you need to run both plugins, change the bezel ports in `X1000_display.ini` to avoid the conflict:
+If you need to run both plugins, change the bezel ports in `X1000_display.ini`:
 
 ```ini
 [bezel]
@@ -374,36 +384,43 @@ Note: the Simionic plugin must be disabled or unloaded before starting X1000_dis
 
 ## Bezel LED Control
 
-### Protocol (reverse-engineered via nRF52840 Wireshark capture, July 2026)
+### Protocol (reverse-engineered via nRF52840 Wireshark capture, August 2026)
 
-The SHB1000S uses a single BLE characteristic (`f62a9f56-...`, handle `0x0008`) for both button input (notifications) and LED output (writes). Single-byte writes control the bezel:
+The SHB1000S uses a single BLE characteristic (`f62a9f56-f29e-48a8-a317-47ee37a58999`) for both button input (notifications) and LED output (writes). Each LED has two control bytes:
 
 | Byte value | Effect |
 |---|---|
-| `0x00` | Reset — all LEDs off, backlight off |
-| `0x01–0x40` (1–64) | Backlight brightness — affects PFD bezel, MFD bezel, and audio panel simultaneously |
-| `>0x40` | Turn ON the LED for the button whose UKP release value equals this byte |
+| `0x01–0x40` | Backlight brightness — **inverted scale**: `0x01`=max bright, `0x40`=off |
+| ON byte | Turn ON the specific LED (see table below) |
+| OFF byte = ON byte + `0x17` | Turn OFF the specific LED |
 
-The plugin sends a binary UDP packet to `x1000_bezel.py` on port 15684:
-- Byte 0: brightness (0–64, mapped from X-Plane `instrument_brightness_ratio`)
-- Bytes 1..N: UKP release values of buttons whose LEDs should be on
+Brightness controls PFD bezel, MFD bezel, and audio panel simultaneously. It must be written **last** in any sequence — the bezel resets brightness on each write.
 
-The bezel script writes the brightness byte, then each active LED byte individually to the bezel via BLE.
+### Audio panel LED bytes
 
-### Audio panel LED UKP values
+| Button | ON byte | OFF byte |
+|---|---|---|
+| COM1/MIC | `0x43` (67) | `0x5a` (90) |
+| COM2/MIC | `0x44` (68) | `0x5b` (91) |
+| COM1 monitor | `0x47` (71) | `0x5e` (94) |
+| COM2 monitor | `0x48` (72) | `0x5f` (95) |
+| NAV1 | `0x52` (82) | `0x69` (105) |
+| NAV2 | `0x53` (83) | `0x6a` (106) |
+| ADF | `0x50` (80) | `0x67` (103) |
+| DME | `0x4f` (79) | `0x66` (102) |
+| MKR/MUTE | `0x4d` (77) | `0x64` (100) |
+| SPKR | `0x4c` (76) | `0x63` (99) |
 
-| Button | UKP release value |
-|---|---|
-| COM1/MIC | 43 |
-| COM2/MIC | 45 |
-| COM1 monitor | 51 |
-| COM2 monitor | 53 |
-| NAV1 | 131 |
-| NAV2 | 133 |
-| ADF | 127 |
-| DME | 125 |
-| MKR/MUTE | 121 |
-| SPKR | 119 |
+### LED sandbox
+
+`docs/led_sandbox.py` is a standalone test script that connects directly to the PFD bezel (bypassing the plugin) and tests brightness and LED control against live X-Plane datarefs. Useful for debugging without recompiling.
+
+```bash
+pkill -f x1000_bezel.py
+bluetoothctl disconnect 00:07:80:A6:E1:71
+sleep 2
+python3 docs/led_sandbox.py
+```
 
 ---
 
@@ -411,8 +428,8 @@ The bezel script writes the brightness byte, then each active LED byte individua
 
 | Button | X-Plane Command |
 |---|---|
-| COM1/MIC | `sim/audio_panel/transmit_audio_com1` |
-| COM2/MIC | `sim/audio_panel/transmit_audio_com2` |
+| COM1/MIC (press) | `sim/audio_panel/transmit_audio_com1` |
+| COM2/MIC (press) | `sim/audio_panel/transmit_audio_com2` |
 | COM1 monitor | `sim/audio_panel/monitor_audio_com1` |
 | COM2 monitor | `sim/audio_panel/monitor_audio_com2` |
 | NAV1 | `sim/audio_panel/monitor_audio_nav1` |
@@ -445,7 +462,7 @@ All tuning parameters are defined at the **top of `src/UKPHandler.cpp`** in a de
 
 **Rules:**
 - `KNOB_NOISE_MS` must be ≤ `KNOB_FAST_THRESHOLD` to avoid filtering valid fast clicks
-- Bug moves too slowly or not at all during fast spin → decrease `KNOB_NOISE_MS`
+- Bug moves too slowly during fast spin → decrease `KNOB_NOISE_MS`
 - Fast-spin mode requires too much speed to trigger → increase `KNOB_FAST_THRESHOLD`
 
 ---
@@ -454,10 +471,12 @@ All tuning parameters are defined at the **top of `src/UKPHandler.cpp`** in a de
 
 Tested on Ubuntu 24.04, X-Plane 12, default Cessna 172 G1000:
 
-| Airport | Without plugin | With plugin | Delta |
-|---|---|---|---|
-| EKVG (light scenery) | 66 fps | 58 fps | −8 fps |
-| LFPG (heavy scenery) | 30 fps | 26 fps | −4 fps |
+| Scenario | FPS impact |
+|---|---|
+| EKVG (light scenery), streaming active | −8 fps (66→58) |
+| LFPG (heavy scenery), streaming active | −4 fps (30→26) |
+| Non-G1000 aircraft loaded | ~0 fps (plugin detects and stops retrying) |
+| G1000 aircraft, screens not popped out | ~0 fps (plugin waits silently, retries every 5s) |
 
 Stream: 1024×768, JPEG quality 85, 15 fps → ~145 KB/frame, ~2 MB/s per display.
 

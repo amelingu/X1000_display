@@ -244,6 +244,13 @@ static int makeUDPSocket(const std::string& ip, uint16_t port,
 // init
 // ---------------------------------------------------------------------------
 
+bool DisplayStreamer::hasG1000Avionics() {
+    // Quick check — does this aircraft have G1000 avionics at all?
+    XPLMAvionicsID pfd = XPLMGetAvionicsHandle(xplm_device_G1000_PFD_1);
+    XPLMAvionicsID mfd = XPLMGetAvionicsHandle(xplm_device_G1000_MFD);
+    return (pfd != nullptr && mfd != nullptr);
+}
+
 bool DisplayStreamer::acquireHandles() {
     // Use XPLMGetAvionicsHandle — no callbacks, just interaction
     // We'll register draw callbacks separately via XPLMRegisterAvionicsCallbacksEx

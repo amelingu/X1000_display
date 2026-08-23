@@ -6,8 +6,16 @@
 # Usage:
 #   python3 x1000_relay.py
 #
-# PFD iPad: open Safari -> http://192.168.1.12:8080/
-# MFD iPad: open Safari -> http://192.168.1.12:8081/
+# The plugin auto-launches this script. The PC IP is shown in the plugin
+# Settings window (Plugins -> X1000 Display -> Settings).
+#
+# To view streams:
+#   PFD iPad : open Safari -> http://<PC_IP>:8080/
+#   MFD iPad : open Safari -> http://<PC_IP>:8081/
+#
+# To view on the X-Plane PC itself (for testing):
+#   PFD      : http://127.0.0.1:8080/
+#   MFD      : http://127.0.0.1:8081/
 
 import asyncio
 import hashlib

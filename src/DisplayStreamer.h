@@ -41,6 +41,7 @@ public:
     void tick();
     void shutdown();
     bool isReady() const { return m_ready; }
+    static bool hasG1000Avionics();  // true if G1000 handles exist in this aircraft
 
     // Called by static draw callbacks registered with XPLMRegisterAvionicsCallbacksEx
     void onDrawPFD();

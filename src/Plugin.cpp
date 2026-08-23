@@ -36,6 +36,8 @@ static int  s_pfd_kb  = 0,         s_mfd_kb  = 0;
 // Auto-retry display init until G1000 avionics are bound
 static bool   s_display_init_pending = false;
 static double s_last_retry_time      = 0.0;
+static bool   s_no_g1000_aircraft    = false;  // true = no G1000 in current aircraft, stop retrying
+static bool   s_g1000_not_windowed_logged = false;  // log "pop out windows" only once
 
 
 // ---------------------------------------------------------------------------
@@ -139,17 +141,34 @@ static float flightLoopCB(float /*elapsed*/, float /*flightLoop*/, int /*count*/
     if (g_display) g_display->tick();
 
     // Auto-retry display init if G1000 wasn't bound at startup.
-    // After a failed attempt (G1000 not found), wait 30s before retrying
-    // to avoid blocking the flight loop when a non-G1000 aircraft is loaded.
-    if (s_display_init_pending && (!g_display || !g_display->isReady())) {
-        double t = Platform::now_seconds();
-        double retry_interval = (s_last_retry_time == 0.0) ? 2.0 : 30.0;
-        if (t - s_last_retry_time >= retry_interval) {
-            s_last_retry_time = t;
-            initDisplay();
-            if (g_display && g_display->isReady()) {
-                s_display_init_pending = false;
-                XPLMDebugString("[X1000] DisplayStreamer auto-init succeeded.\n");
+    //
+    // Strategy:
+    // 1. First check if the aircraft even has G1000 avionics (instant, no sleep).
+    //    If not — stop retrying entirely until next aircraft load.
+    // 2. If G1000 exists but not yet windowed/bound — retry every 5s.
+    //    The bind check (XPLMIsAvionicsBound) only succeeds when the G1000
+    //    screen is popped out as a floating window, so no stutter when
+    //    flying G1000 aircraft without streaming.
+    if (s_display_init_pending && !s_no_g1000_aircraft &&
+        (!g_display || !g_display->isReady())) {
+
+        // Quick non-blocking check first — does this aircraft have G1000?
+        if (!DisplayStreamer::hasG1000Avionics()) {
+            s_no_g1000_aircraft = true;
+            XPLMDebugString("[X1000] No G1000 avionics in this aircraft — streaming disabled.\n");
+        } else {
+            double t = Platform::now_seconds();
+            if (t - s_last_retry_time >= 5.0) {
+                s_last_retry_time = t;
+                initDisplay();
+                if (g_display && g_display->isReady()) {
+                    s_display_init_pending = false;
+                    XPLMDebugString("[X1000] DisplayStreamer auto-init succeeded.\n");
+                } else if (!s_g1000_not_windowed_logged) {
+                    XPLMDebugString("[X1000] G1000 found but screen not popped out yet — pop out PFD and MFD windows to start streaming.\n");
+                    s_g1000_not_windowed_logged = true;
+                }
+                // G1000 exists but screen not popped out yet — keep retrying every 5s
             }
         }
     }
@@ -318,6 +337,8 @@ PLUGIN_API void XPluginReceiveMessage(XPLMPluginID, int msg, void*) {
         // Set pending flag; flight loop retries every 2 seconds.
         s_display_init_pending = true;
         s_last_retry_time      = 0.0;
+        s_no_g1000_aircraft           = false;
+        s_g1000_not_windowed_logged   = false;
 
         // Auto-start relay if it stopped (e.g. after a crash)
         if (g_settings && g_settings->get().autostart &&
