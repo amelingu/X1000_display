@@ -55,6 +55,7 @@ CXXFLAGS=(
 
     # Target XPLM 4.1+ API (required for XPLMGetAvionicsHandle/Geometry/etc.)
     # Also define the earlier version macros as required by the SDK
+    -DXPLM440=1
     -DXPLM410=1
     -DXPLM400=1
     -DXPLM303=1

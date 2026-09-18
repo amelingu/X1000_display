@@ -284,30 +284,45 @@ bool DisplayStreamer::acquireHandles() {
     return true;
 }
 
-bool DisplayStreamer::registerDrawCallbacks() {
-    // Register drawCallbackAfter for PFD
-    XPLMCustomizeAvionics_t pfd_params = {};
-    pfd_params.structSize         = sizeof(XPLMCustomizeAvionics_t);
-    pfd_params.deviceId           = xplm_device_G1000_PFD_1;
-    pfd_params.drawCallbackBefore = nullptr;
-    pfd_params.drawCallbackAfter  = drawCallbackPFD;
-    pfd_params.refcon             = nullptr;
+// Helper: register avionics callback with contentType=OpenGL (legacy glReadPixels
+// capture). Falls back to smaller struct if running on older X-Plane versions.
+static XPLMAvionicsID registerCallback(XPLMDeviceID device,
+                                        XPLMAvionicsCallback_f cb) {
+#if defined(XPLM440)
+    // Try with SDK 4.4.0 struct first (contentType field present)
+    // contentType = 0 = xplm_WindowContentTypeOpenGL (legacy OpenGL drawing)
+    XPLMCustomizeAvionics_t p = {};
+    p.structSize        = sizeof(XPLMCustomizeAvionics_t);
+    p.deviceId          = device;
+    p.drawCallbackAfter = cb;
+    p.contentType       = xplm_WindowContentTypeOpenGL;
+    XPLMAvionicsID h = XPLMRegisterAvionicsCallbacksEx(&p);
+    if (h) return h;
+    // Fall back: try with SDK 4.1.0 struct size (no contentType field)
+    // so old X-Plane 12.4.3 accepts it
+    p.structSize = offsetof(XPLMCustomizeAvionics_t, contentType);
+    h = XPLMRegisterAvionicsCallbacksEx(&p);
+    if (h) {
+        XPLMDebugString("[X1000] Using SDK 4.1.0 struct (X-Plane < 12.4.4)\n");
+    }
+    return h;
+#else
+    XPLMCustomizeAvionics_t p = {};
+    p.structSize        = sizeof(XPLMCustomizeAvionics_t);
+    p.deviceId          = device;
+    p.drawCallbackAfter = cb;
+    return XPLMRegisterAvionicsCallbacksEx(&p);
+#endif
+}
 
-    m_pfd_cb_handle = XPLMRegisterAvionicsCallbacksEx(&pfd_params);
+bool DisplayStreamer::registerDrawCallbacks() {
+    m_pfd_cb_handle = registerCallback(xplm_device_G1000_PFD_1, drawCallbackPFD);
     if (!m_pfd_cb_handle) {
         XPLMDebugString("[X1000] Failed to register PFD draw callback\n");
         return false;
     }
 
-    // Register drawCallbackAfter for MFD
-    XPLMCustomizeAvionics_t mfd_params = {};
-    mfd_params.structSize         = sizeof(XPLMCustomizeAvionics_t);
-    mfd_params.deviceId           = xplm_device_G1000_MFD;
-    mfd_params.drawCallbackBefore = nullptr;
-    mfd_params.drawCallbackAfter  = drawCallbackMFD;
-    mfd_params.refcon             = nullptr;
-
-    m_mfd_cb_handle = XPLMRegisterAvionicsCallbacksEx(&mfd_params);
+    m_mfd_cb_handle = registerCallback(xplm_device_G1000_MFD, drawCallbackMFD);
     if (!m_mfd_cb_handle) {
         XPLMDebugString("[X1000] Failed to register MFD draw callback\n");
         return false;
@@ -320,8 +335,20 @@ bool DisplayStreamer::registerDrawCallbacks() {
 bool DisplayStreamer::init(const StreamConfig& cfg) {
     m_cfg = cfg;
 
-    if (!acquireHandles())        return false;
+    // In SDK 4.4.0+, XPLMGetAvionicsHandle may return NULL until callbacks
+    // are registered first. Try registering callbacks before acquiring handles.
     if (!registerDrawCallbacks()) return false;
+    // If acquireHandles() fails after registering, use the callback handles directly
+    if (!acquireHandles()) {
+        // Fallback: use the callback handles as avionics handles
+        if (m_pfd_cb_handle && m_mfd_cb_handle) {
+            m_pfd_handle = m_pfd_cb_handle;
+            m_mfd_handle = m_mfd_cb_handle;
+            XPLMDebugString("[X1000] Using callback handles as avionics handles\n");
+        } else {
+            return false;
+        }
+    }
 
     m_pfd_sock = makeUDPSocket(cfg.pfd_ip, cfg.pfd_push_port, m_pfd_addr);
     m_mfd_sock = makeUDPSocket(cfg.mfd_ip, cfg.mfd_push_port, m_mfd_addr);
