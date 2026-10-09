@@ -184,6 +184,48 @@ bool Platform::loadGLBufferFunctions() {
     return ok;
 }
 
+// FBO function pointers (Linux/Mac)
+void   (*Platform::glGenFramebuffers_)        (GLsizei, GLuint*)                   = nullptr;
+void   (*Platform::glDeleteFramebuffers_)     (GLsizei, const GLuint*)             = nullptr;
+void   (*Platform::glBindFramebuffer_)        (GLenum, GLuint)                     = nullptr;
+void   (*Platform::glFramebufferTexture2D_)   (GLenum, GLenum, GLenum, GLuint, GLint) = nullptr;
+GLenum (*Platform::glCheckFramebufferStatus_) (GLenum)                             = nullptr;
+void   (*Platform::glBlitFramebuffer_)        (GLint, GLint, GLint, GLint,
+                                               GLint, GLint, GLint, GLint,
+                                               GLbitfield, GLenum)                 = nullptr;
+
+bool Platform::loadGLFBOFunctions() {
+    static bool loaded = false, ok = false;
+    if (loaded) return ok;
+    loaded = true;
+
+#if defined(__APPLE__)
+    const char* libname = "/System/Library/Frameworks/OpenGL.framework/OpenGL";
+#else
+    const char* libname = "libGL.so.1";
+#endif
+    void* lib = dlopen(libname, RTLD_NOW | RTLD_NOLOAD);
+    if (!lib) lib = dlopen(libname, RTLD_NOW);
+#if defined(LIN)
+    if (!lib) lib = dlopen("libGL.so", RTLD_NOW);
+#endif
+    if (!lib) return false;
+
+    glGenFramebuffers_        = (void(*)(GLsizei,GLuint*))                   dlsym(lib,"glGenFramebuffers");
+    glDeleteFramebuffers_     = (void(*)(GLsizei,const GLuint*))             dlsym(lib,"glDeleteFramebuffers");
+    glBindFramebuffer_        = (void(*)(GLenum,GLuint))                     dlsym(lib,"glBindFramebuffer");
+    glFramebufferTexture2D_   = (void(*)(GLenum,GLenum,GLenum,GLuint,GLint)) dlsym(lib,"glFramebufferTexture2D");
+    glCheckFramebufferStatus_ = (GLenum(*)(GLenum))                          dlsym(lib,"glCheckFramebufferStatus");
+    glBlitFramebuffer_        = (void(*)(GLint,GLint,GLint,GLint,GLint,GLint,GLint,GLint,GLbitfield,GLenum))
+                                                                             dlsym(lib,"glBlitFramebuffer");
+
+    ok = glGenFramebuffers_ && glDeleteFramebuffers_ && glBindFramebuffer_
+      && glFramebufferTexture2D_ && glCheckFramebufferStatus_ && glBlitFramebuffer_;
+    XPLMDebugString(ok ? "[X1000] Platform: GL FBO functions loaded OK\n"
+                       : "[X1000] Platform: GL FBO functions missing\n");
+    return ok;
+}
+
 // ---------------------------------------------------------------------------
 // Path utilities
 // ---------------------------------------------------------------------------
@@ -352,6 +394,42 @@ bool Platform::loadGLBufferFunctions() {
 
     XPLMDebugString(ok ? "[X1000] Platform: GL buffer functions loaded OK\n"
                        : "[X1000] Platform: some GL functions missing\n");
+    return ok;
+}
+
+// FBO function pointers (Windows)
+void   (*Platform::glGenFramebuffers_)        (GLsizei, GLuint*)                      = nullptr;
+void   (*Platform::glDeleteFramebuffers_)     (GLsizei, const GLuint*)                = nullptr;
+void   (*Platform::glBindFramebuffer_)        (GLenum, GLuint)                        = nullptr;
+void   (*Platform::glFramebufferTexture2D_)   (GLenum, GLenum, GLenum, GLuint, GLint) = nullptr;
+GLenum (*Platform::glCheckFramebufferStatus_) (GLenum)                                = nullptr;
+void   (*Platform::glBlitFramebuffer_)        (GLint, GLint, GLint, GLint,
+                                               GLint, GLint, GLint, GLint,
+                                               GLbitfield, GLenum)                    = nullptr;
+
+bool Platform::loadGLFBOFunctions() {
+    static bool loaded = false, ok = false;
+    if (loaded) return ok;
+    loaded = true;
+
+    void* p;
+    p = (void*)wglGetProcAddress("glGenFramebuffers");
+    memcpy(&glGenFramebuffers_,        &p, sizeof(p));
+    p = (void*)wglGetProcAddress("glDeleteFramebuffers");
+    memcpy(&glDeleteFramebuffers_,     &p, sizeof(p));
+    p = (void*)wglGetProcAddress("glBindFramebuffer");
+    memcpy(&glBindFramebuffer_,        &p, sizeof(p));
+    p = (void*)wglGetProcAddress("glFramebufferTexture2D");
+    memcpy(&glFramebufferTexture2D_,   &p, sizeof(p));
+    p = (void*)wglGetProcAddress("glCheckFramebufferStatus");
+    memcpy(&glCheckFramebufferStatus_, &p, sizeof(p));
+    p = (void*)wglGetProcAddress("glBlitFramebuffer");
+    memcpy(&glBlitFramebuffer_,        &p, sizeof(p));
+
+    ok = glGenFramebuffers_ && glDeleteFramebuffers_ && glBindFramebuffer_
+      && glFramebufferTexture2D_ && glCheckFramebufferStatus_ && glBlitFramebuffer_;
+    XPLMDebugString(ok ? "[X1000] Platform: GL FBO functions loaded OK\n"
+                       : "[X1000] Platform: GL FBO functions missing\n");
     return ok;
 }
 

@@ -53,7 +53,7 @@ CXXFLAGS=(
     -fPIC
     -fvisibility=hidden
 
-    # Target XPLM 4.1+ API (required for XPLMGetAvionicsHandle/Geometry/etc.)
+    # Target XPLM 4.4+ API (required for XPLMCustomizeAvionics_t contentType field)
     # Also define the earlier version macros as required by the SDK
     -DXPLM440=1
     -DXPLM410=1

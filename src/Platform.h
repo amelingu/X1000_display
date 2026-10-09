@@ -120,6 +120,31 @@ extern GLboolean (*glUnmapBuffer_)  (GLenum);
 #define glUnmapBuffer   Platform::glUnmapBuffer_
 
 // ---------------------------------------------------------------------------
+// GL FBO functions (OpenGL 3.0 / ARB_framebuffer_object — loaded at runtime)
+// ---------------------------------------------------------------------------
+
+// Call once; returns true if all FBO functions loaded successfully.
+bool loadGLFBOFunctions();
+
+// Populated by loadGLFBOFunctions().
+extern void   (*glGenFramebuffers_)          (GLsizei, GLuint*);
+extern void   (*glDeleteFramebuffers_)       (GLsizei, const GLuint*);
+extern void   (*glBindFramebuffer_)          (GLenum, GLuint);
+extern void   (*glFramebufferTexture2D_)     (GLenum, GLenum, GLenum, GLuint, GLint);
+extern GLenum (*glCheckFramebufferStatus_)   (GLenum);
+extern void   (*glBlitFramebuffer_)          (GLint, GLint, GLint, GLint,
+                                              GLint, GLint, GLint, GLint,
+                                              GLbitfield, GLenum);
+
+// Convenience macros
+#define glGenFramebuffers       Platform::glGenFramebuffers_
+#define glDeleteFramebuffers    Platform::glDeleteFramebuffers_
+#define glBindFramebuffer       Platform::glBindFramebuffer_
+#define glFramebufferTexture2D  Platform::glFramebufferTexture2D_
+#define glCheckFramebufferStatus Platform::glCheckFramebufferStatus_
+#define glBlitFramebuffer       Platform::glBlitFramebuffer_
+
+// ---------------------------------------------------------------------------
 // Path utilities
 // ---------------------------------------------------------------------------
 
@@ -152,4 +177,31 @@ double now_seconds();
 #endif
 #ifndef GL_READ_ONLY
 #define GL_READ_ONLY 0x88B8
+#endif
+
+// FBO constants (GL 3.0 / ARB_framebuffer_object)
+#ifndef GL_RGBA8
+#define GL_RGBA8                        0x8058
+#endif
+
+#ifndef GL_FRAMEBUFFER
+#define GL_FRAMEBUFFER                  0x8D40
+#define GL_READ_FRAMEBUFFER             0x8CA8
+#define GL_DRAW_FRAMEBUFFER             0x8CA9
+#define GL_COLOR_ATTACHMENT0            0x8CE0
+#define GL_FRAMEBUFFER_COMPLETE         0x8CD5
+#define GL_FRAMEBUFFER_BINDING          0x8CA6
+#define GL_READ_FRAMEBUFFER_BINDING     0x8CAA
+#define GL_DRAW_FRAMEBUFFER_BINDING     0x8CA6  // alias for GL_FRAMEBUFFER_BINDING
+#define GL_RGB8                         0x8051
+#endif
+
+// GL_NEAREST already defined in base gl.h (0x2600), no need to redefine
+
+// GL_BGR / GL_BGRA — not in base gl.h on all platforms
+#ifndef GL_BGR
+#define GL_BGR  0x80E0
+#endif
+#ifndef GL_BGRA
+#define GL_BGRA 0x80E1
 #endif

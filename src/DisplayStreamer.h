@@ -11,11 +11,18 @@
 #include <vector>
 #if defined(_WIN32)
 #  include <winsock2.h>
+// On 64-bit Windows, SOCKET is UINT_PTR (unsigned 64-bit).
+// Using 'int' would truncate the handle and corrupt subsequent calls.
+typedef SOCKET sock_t;
+static const sock_t INVALID_SOCK = INVALID_SOCKET;
 #else
 #  include <sys/socket.h>
 #  include <netinet/in.h>
+typedef int sock_t;
+static const sock_t INVALID_SOCK = -1;
 #endif
 #include <XPLMDisplay.h>
+#include "Platform.h"   // GL types (GLuint etc.)
 
 enum class StreamMethod { XPLM, FFMPEG };
 
@@ -43,18 +50,22 @@ public:
     bool isReady() const { return m_ready; }
     static bool hasG1000Avionics();  // true if G1000 handles exist in this aircraft
 
-    // Called by static draw callbacks registered with XPLMRegisterAvionicsCallbacksEx
+    // Called by static avionics draw callbacks (viewport snapshot only, no GL readback)
     void onDrawPFD();
     void onDrawMFD();
+    // Called by scene-phase draw callback (safe point for glReadPixels under Zink)
+    void onScenePhase();
 
 private:
     bool acquireHandles();
     bool registerDrawCallbacks();
 
-    void captureAndSend(int w, int h, int sock, sockaddr_in& addr,
+    void captureAndSend(int rx, int ry, int rw, int rh,
+                        GLuint fbo,
+                        sock_t sock, sockaddr_in& addr,
                         const char* name);
     void pushFrame(const uint8_t* data, size_t len,
-                   int sock, sockaddr_in& addr);
+                   sock_t sock, sockaddr_in& addr);
 
     // Unused ffmpeg stubs
     bool startFfmpeg();
@@ -67,8 +78,8 @@ private:
     XPLMAvionicsID m_pfd_cb_handle  = nullptr; // handle from RegisterCallbacksEx
     XPLMAvionicsID m_mfd_cb_handle  = nullptr;
 
-    int         m_pfd_sock = -1;
-    int         m_mfd_sock = -1;
+    sock_t      m_pfd_sock = INVALID_SOCK;
+    sock_t      m_mfd_sock = INVALID_SOCK;
     sockaddr_in m_pfd_addr = {};
     sockaddr_in m_mfd_addr = {};
 
@@ -78,8 +89,6 @@ private:
 
     StreamConfig m_cfg;
     bool         m_ready = false;
+    bool         m_scene_cb_registered = false;
     double       m_last_frame_time = 0.0;
-
-
-    // fps and stream_width are in StreamConfig
 };

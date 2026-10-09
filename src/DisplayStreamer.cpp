@@ -1,19 +1,26 @@
-// DisplayStreamer.cpp — Option A: Avionics draw callback + JPEG + UDP push
+// DisplayStreamer.cpp — G1000 capture: blit FBO + deferred readback + JPEG + UDP
 //
-// Correct approach for capturing built-in G1000 screens:
-//   XPLMRegisterAvionicsCallbacksEx() with drawCallbackAfter
-//   → X-Plane calls our callback after rendering the G1000
-//   → Inside the callback, glReadPixels at (0,0,w,h) captures the panel
-//   → We encode to JPEG and push via UDP to the iPad
+// Fix 8 approach (Zink-safe):
+//   1. XPLMRegisterAvionicsCallbacksEx() drawCallbackAfter.
+//      Inside: glGetIntegerv(GL_VIEWPORT) once to learn panel size (CPU-side,
+//      no GPU sync, no framebuffer state touched).  Then if our blit FBO is
+//      ready: glBindFramebuffer(DRAW, our_fbo) + glBlitFramebuffer + restore
+//      DRAW to 0 hardcoded (no glGetIntegerv for framebuffer binding).
+//   2. XPLMRegisterDrawCallback(xplm_Phase_Window) — safe for GL state ops.
+//      Allocates blit FBO on first use (lazy, from dimensions cached in step 1).
+//      Then glReadPixels(0,0,w,h) from our own FBO — not X-Plane's.
+//   3. JPEG encode + UDP chunked send run on a background worker thread.
 //
-// Screen dimensions from XPLMGetAvionicsScreenSize() (XPLM410).
-// No geometry queries needed — in the draw callback, panel coords are always
-// (0,0) to (screenWidth, screenHeight).
+// Key insight: XPLMGetAvionicsGeometry() returns popup window bounds, NOT the
+// in-sim panel position. The only way to read G1000 pixels is from INSIDE the
+// avionics callback where the GL context is already on the panel FBO.
 
 #include "DisplayStreamer.h"
 #include <XPLMUtilities.h>
 #include <XPLMDataAccess.h>
 #include <XPLMGraphics.h>
+#include <XPLMDisplay.h>    // XPLMRegisterDrawCallback / XPLMUnregisterDrawCallback
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -39,7 +46,14 @@
 #include <atomic>
 #include "Platform.h"   // GL includes + loadGLBufferFunctions + cross-platform utils
 
-// Platform.h defines glGenBuffers etc. as macros pointing to Platform::glGenBuffers_
+// Bring Platform function pointers into scope so glBindFramebuffer_ etc. resolve
+// without needing the Platform:: prefix everywhere.
+using Platform::glGenFramebuffers_;
+using Platform::glDeleteFramebuffers_;
+using Platform::glBindFramebuffer_;
+using Platform::glFramebufferTexture2D_;
+using Platform::glCheckFramebufferStatus_;
+using Platform::glBlitFramebuffer_;
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmissing-field-initializers"
@@ -63,9 +77,9 @@ static const size_t   CHUNK_DATA  = UDP_MTU - CHUNK_HDR;
 
 struct EncodeJob {
     std::vector<uint8_t> pixels;  // scaled, flipped, RGB
-    int    w, h;
-    int    quality;
-    int    sock;
+    int     w, h;
+    int     quality;
+    sock_t  sock;   // SOCKET on Windows (UINT_PTR/64-bit); int on POSIX
     sockaddr_in addr;
 };
 
@@ -135,8 +149,14 @@ static void workerFunc() {
                 static bool err_logged = false;
                 if (!err_logged) {
                     char ebuf[64];
+#if defined(_WIN32)
+                    snprintf(ebuf, sizeof(ebuf),
+                             "[X1000] worker sendto failed: WSAError=%d\n",
+                             WSAGetLastError());
+#else
                     snprintf(ebuf, sizeof(ebuf),
                              "[X1000] worker sendto failed: errno=%d\n", errno);
+#endif
                     XPLMDebugString(ebuf);
                     err_logged = true;
                 }
@@ -177,11 +197,50 @@ static void stopWorker() {
 
 // Platform::now_seconds() provided by Platform::
 
-static void jpegWriteCB(void* ctx, void* data, int size) {
-    auto* buf = (std::vector<uint8_t>*)ctx;
-    auto* ptr = (uint8_t*)data;
-    buf->insert(buf->end(), ptr, ptr + size);
-}
+// ---------------------------------------------------------------------------
+// Deferred FBO blit capture
+//
+// X-Plane 12.4.4 on Windows uses Mesa Zink (OpenGL over Vulkan).
+// Both glReadPixels AND glMapBuffer crash Zink inside an avionics draw
+// callback because they force pipeline flushes that Vulkan cannot handle
+// safely while inside a render pass.
+//
+// Safe strategy: inside the avionics callback, blit the avionics FBO into
+// an application-owned FBO (GPU→GPU, no readback, safe inside render pass),
+// then call glReadPixels from a scene-phase callback AFTER all avionics
+// have finished rendering, at which point we read from our own FBO —
+// not X-Plane's — so the render pass is over and Zink is happy.
+//
+// Our blit FBO owns a single RGB texture sized to the avionics panel.
+// It is created lazily on first use and recreated if the panel size changes.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Fix 7: Zero-GL avionics callback approach
+//
+// Root cause: under Zink (Mesa OpenGL→Vulkan bridge), ANY GL call inside the
+// avionics draw callback that touches framebuffer state — including
+// glBlitFramebuffer and glBindFramebuffer — corrupts the Vulkan render pass.
+// The corruption manifests as a crash on the SECOND frame.
+//
+// Solution: avionics callback does zero GL work — only sets a pending flag.
+// The xplm_Phase_Window callback then calls XPLMGetAvionicsGeometry() for GL
+// screen-space panel bounds, and reads directly from FBO 0 with glReadPixels.
+// No blit FBO, no state queries — completely safe under Zink/Vulkan.
+// ---------------------------------------------------------------------------
+
+// DeferredCapture — carries panel state between avionics callback and scene phase.
+// All fields written+read on the render thread only; no locking needed.
+struct DeferredCapture {
+    std::atomic<bool> pending{false};  // avionics callback sets true each frame
+    GLint rw = 0, rh = 0;             // panel pixel dimensions (from GL_VIEWPORT)
+    GLuint fbo = 0;                   // our blit-destination FBO
+    GLuint tex = 0;                   // RGB8 texture attached to fbo
+    std::atomic<bool> fbo_ready{false}; // fbo/tex allocated and sized correctly
+};
+
+static DeferredCapture s_pfd_capture;
+static DeferredCapture s_mfd_capture;
 
 // ---------------------------------------------------------------------------
 // Static draw callbacks — called by X-Plane after rendering each G1000
@@ -190,17 +249,67 @@ static void jpegWriteCB(void* ctx, void* data, int size) {
 // Forward declaration
 static DisplayStreamer* g_streamer = nullptr;
 
+// Avionics callbacks: ZERO GL calls under Zink.
+// We only set a pending flag so onScenePhase() knows to capture this device.
+// All GL work (geometry query + glReadPixels) happens in the safe Window phase.
+
+// blitPanelToFBO — called from avionics draw callback (after X-Plane rendered).
+// Zink-safe rules:
+//   - glGetIntegerv(GL_VIEWPORT) is CPU-side state, no GPU sync, safe.
+//   - glBindFramebuffer(DRAW, ...) + glBlitFramebuffer: GPU-only, no readback.
+//   - Restore DRAW to 0 hardcoded — no glGetIntegerv(framebuffer) query.
+//   - X-Plane re-binds its own framebuffers after our callback returns anyway.
+static void blitPanelToFBO(DeferredCapture& cap) {
+    // Step 1: learn panel size from viewport (once, or if it changed).
+    GLint vp[4] = {};
+    glGetIntegerv(GL_VIEWPORT, vp);
+    GLint w = vp[2] & ~1;
+    GLint h = vp[3] & ~1;
+    if (w > 0 && h > 0) { cap.rw = w; cap.rh = h; }
+
+    // Step 2: if our FBO is ready and sized correctly, do the blit.
+    if (cap.fbo_ready.load(std::memory_order_acquire) &&
+        cap.rw == w && cap.rh == h && w > 0 && h > 0) {
+        // READ is the avionics panel FBO (set by X-Plane before our callback).
+        // DRAW is ours. Blit panel → our texture.
+        glBindFramebuffer_(GL_DRAW_FRAMEBUFFER, cap.fbo);
+        glBlitFramebuffer_(0, 0, w, h, 0, 0, w, h,
+                           GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        // Restore DRAW to default — hardcoded 0, no query needed.
+        glBindFramebuffer_(GL_DRAW_FRAMEBUFFER, 0);
+        cap.pending.store(true, std::memory_order_release);
+    }
+    // If FBO not ready: onScenePhase() will allocate it next frame.
+}
+
 static int drawCallbackPFD(XPLMDeviceID /*device*/,
                            int          /*isBefore*/,
                            void*        /*refcon*/) {
-    if (g_streamer) g_streamer->onDrawPFD();
-    return 1; // 1 = let X-Plane draw normally
+    if (!g_streamer) return 1;
+    static bool once = false;
+    if (!once) { XPLMDebugString("[X1000] PFD avionics callback fired\n"); once = true; }
+    blitPanelToFBO(s_pfd_capture);
+    return 1;
 }
 
 static int drawCallbackMFD(XPLMDeviceID /*device*/,
                            int          /*isBefore*/,
                            void*        /*refcon*/) {
-    if (g_streamer) g_streamer->onDrawMFD();
+    if (!g_streamer) return 1;
+    static bool once = false;
+    if (!once) { XPLMDebugString("[X1000] MFD avionics callback fired\n"); once = true; }
+    blitPanelToFBO(s_mfd_capture);
+    return 1;
+}
+
+// Window-phase callback — fires during 2-D overlay, after avionics are done.
+// glReadPixels from FBO 0 here is safe under Zink/Vulkan.
+static int scenePhaseCallback(XPLMDrawingPhase /*phase*/,
+                              int              /*isBefore*/,
+                              void*            /*refcon*/) {
+    static bool once = false;
+    if (!once) { XPLMDebugString("[X1000] scene-phase callback fired\n"); once = true; }
+    if (g_streamer) g_streamer->onScenePhase();
     return 1;
 }
 
@@ -212,8 +321,8 @@ DisplayStreamer::DisplayStreamer()
     , m_ready(false)
     , m_last_frame_time(0.0)
     , m_frame_seq(0)
-    , m_pfd_sock(-1)
-    , m_mfd_sock(-1)
+    , m_pfd_sock(INVALID_SOCK)
+    , m_mfd_sock(INVALID_SOCK)
 {
     g_streamer = this;
 }
@@ -227,10 +336,12 @@ DisplayStreamer::~DisplayStreamer() {
 // UDP socket setup
 // ---------------------------------------------------------------------------
 
-static int makeUDPSocket(const std::string& ip, uint16_t port,
-                         sockaddr_in& out_addr) {
-    int fd = (int)socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (fd < 0) return -1;
+static sock_t makeUDPSocket(const std::string& ip, uint16_t port,
+                             sockaddr_in& out_addr) {
+    // On Windows, socket() returns SOCKET (UINT_PTR, 64-bit).
+    // Never cast to int — that truncates the handle on 64-bit Windows.
+    sock_t fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (fd == INVALID_SOCK) return INVALID_SOCK;
     int sndbuf = 4 * 1024 * 1024;
     setsockopt(fd, SOL_SOCKET, SO_SNDBUF, (const char*)&sndbuf, sizeof(sndbuf));
     memset(&out_addr, 0, sizeof(out_addr));
@@ -244,27 +355,58 @@ static int makeUDPSocket(const std::string& ip, uint16_t port,
 // init
 // ---------------------------------------------------------------------------
 
+// Dummy draw callback used only for the hasG1000Avionics() probe.
+static int drawCallbackProbe(XPLMDeviceID, int, void*) { return 1; }
+
 bool DisplayStreamer::hasG1000Avionics() {
-    // Quick check — does this aircraft have G1000 avionics at all?
+    // On X-Plane < 12.4.4, XPLMGetAvionicsHandle returns a valid handle
+    // when a G1000 aircraft is loaded.  On 12.4.4+, it returns NULL until a
+    // callback is registered first.  We try both paths so the check works on
+    // all simulator versions.
+
+    // Path 1: old API (12.4.3 and earlier)
     XPLMAvionicsID pfd = XPLMGetAvionicsHandle(xplm_device_G1000_PFD_1);
     XPLMAvionicsID mfd = XPLMGetAvionicsHandle(xplm_device_G1000_MFD);
-    return (pfd != nullptr && mfd != nullptr);
+    if (pfd && mfd) return true;
+
+    // Path 2: new API (12.4.4+) — register a probe callback and check result
+    XPLMCustomizeAvionics_t p = {};
+    p.structSize        = sizeof(XPLMCustomizeAvionics_t);
+    p.deviceId          = xplm_device_G1000_PFD_1;
+    p.drawCallbackAfter = drawCallbackProbe;
+#if defined(XPLM440)
+    p.contentType       = xplm_WindowContentTypeOpenGL;
+#endif
+    XPLMAvionicsID probe = XPLMRegisterAvionicsCallbacksEx(&p);
+    if (!probe) return false;            // not a G1000 aircraft
+    XPLMUnregisterAvionicsCallbacks(probe);
+    return true;
 }
 
 bool DisplayStreamer::acquireHandles() {
-    // Use XPLMGetAvionicsHandle — no callbacks, just interaction
-    // We'll register draw callbacks separately via XPLMRegisterAvionicsCallbacksEx
+    // XPLMGetAvionicsHandle works on X-Plane < 12.4.4 without any prerequisites.
+    // On 12.4.4+, it returns NULL until XPLMRegisterAvionicsCallbacksEx has been
+    // called first (which init() does before calling acquireHandles).
     m_pfd_handle = XPLMGetAvionicsHandle(xplm_device_G1000_PFD_1);
     m_mfd_handle = XPLMGetAvionicsHandle(xplm_device_G1000_MFD);
 
     if (!m_pfd_handle || !m_mfd_handle) {
-        XPLMDebugString("[X1000] XPLMGetAvionicsHandle returned NULL\n");
+        // 12.4.4+ path: use callback handles as avionics handles.
+        // XPLMGetAvionicsGeometry with these handles returns (0,0,0,0) on
+        // some X-Plane 12.4.4 builds; if so, we fall back to the full viewport.
+        if (m_pfd_cb_handle && m_mfd_cb_handle) {
+            m_pfd_handle = m_pfd_cb_handle;
+            m_mfd_handle = m_mfd_cb_handle;
+            XPLMDebugString("[X1000] Using callback handles as avionics handles (X-Plane 12.4.4+)\n");
+            return true;
+        }
+        XPLMDebugString("[X1000] XPLMGetAvionicsHandle returned NULL — no G1000 or callbacks not registered\n");
         return false;
     }
 
-    // Check avionics binding — limit attempts and sleep time to avoid
-    // blocking the flight loop when a non-G1000 aircraft is loaded.
-    // The Plugin.cpp retry loop (30s backoff) handles repeated attempts.
+    // On 12.4.3 and earlier: confirm the G1000 is actually bound to this aircraft.
+    // Limit attempts to avoid blocking the flight loop; the Plugin.cpp retry
+    // loop (30 s backoff) handles repeated attempts.
     int pfd_bound = 0, mfd_bound = 0;
     for (int i = 0; i < 3; ++i) {
         pfd_bound = XPLMIsAvionicsBound(m_pfd_handle);
@@ -275,7 +417,7 @@ bool DisplayStreamer::acquireHandles() {
                  i+1, pfd_bound, mfd_bound);
         XPLMDebugString(buf);
         if (pfd_bound && mfd_bound) break;
-        usleep(100000);  // 100ms — max 300ms total block
+        usleep(100000);  // 100 ms — max 300 ms total block
     }
     if (!pfd_bound || !mfd_bound) {
         XPLMDebugString("[X1000] G1000 not bound — load a G1000 aircraft.\n");
@@ -284,33 +426,27 @@ bool DisplayStreamer::acquireHandles() {
     return true;
 }
 
-// Helper: register avionics callback with contentType=OpenGL (legacy glReadPixels
-// capture). Falls back to smaller struct if running on older X-Plane versions.
+// Helper: register a draw callback, trying the new (XPLM440) struct first,
+// then falling back to the old struct size for X-Plane < 12.4.4.
 static XPLMAvionicsID registerCallback(XPLMDeviceID device,
                                         XPLMAvionicsCallback_f cb) {
-#if defined(XPLM440)
-    // Try with SDK 4.4.0 struct first (contentType field present)
-    // contentType = 0 = xplm_WindowContentTypeOpenGL (legacy OpenGL drawing)
     XPLMCustomizeAvionics_t p = {};
     p.structSize        = sizeof(XPLMCustomizeAvionics_t);
     p.deviceId          = device;
     p.drawCallbackAfter = cb;
+#if defined(XPLM440)
+    // Tell X-Plane we want to keep the legacy OpenGL framebuffer so that
+    // glReadPixels / PBO capture continues to work on 12.4.4+.
     p.contentType       = xplm_WindowContentTypeOpenGL;
     XPLMAvionicsID h = XPLMRegisterAvionicsCallbacksEx(&p);
     if (h) return h;
-    // Fall back: try with SDK 4.1.0 struct size (no contentType field)
-    // so old X-Plane 12.4.3 accepts it
-    p.structSize = offsetof(XPLMCustomizeAvionics_t, contentType);
+    // Fall back to old struct size for X-Plane < 12.4.4 (ignores contentType)
+    p.structSize  = (int)offsetof(XPLMCustomizeAvionics_t, contentType);
+    p.contentType = 0;
     h = XPLMRegisterAvionicsCallbacksEx(&p);
-    if (h) {
-        XPLMDebugString("[X1000] Using SDK 4.1.0 struct (X-Plane < 12.4.4)\n");
-    }
+    if (h) XPLMDebugString("[X1000] Using SDK 4.1.0 struct size (X-Plane < 12.4.4)\n");
     return h;
 #else
-    XPLMCustomizeAvionics_t p = {};
-    p.structSize        = sizeof(XPLMCustomizeAvionics_t);
-    p.deviceId          = device;
-    p.drawCallbackAfter = cb;
     return XPLMRegisterAvionicsCallbacksEx(&p);
 #endif
 }
@@ -335,30 +471,39 @@ bool DisplayStreamer::registerDrawCallbacks() {
 bool DisplayStreamer::init(const StreamConfig& cfg) {
     m_cfg = cfg;
 
-    // In SDK 4.4.0+, XPLMGetAvionicsHandle may return NULL until callbacks
-    // are registered first. Try registering callbacks before acquiring handles.
-    if (!registerDrawCallbacks()) return false;
-    // If acquireHandles() fails after registering, use the callback handles directly
-    if (!acquireHandles()) {
-        // Fallback: use the callback handles as avionics handles
-        if (m_pfd_cb_handle && m_mfd_cb_handle) {
-            m_pfd_handle = m_pfd_cb_handle;
-            m_mfd_handle = m_mfd_cb_handle;
-            XPLMDebugString("[X1000] Using callback handles as avionics handles\n");
-        } else {
-            return false;
-        }
+    // Load GL extension function pointers needed for FBO operations.
+    // Must be called before any glGenFramebuffers_ / glBindFramebuffer_ etc.
+    if (!Platform::loadGLFBOFunctions()) {
+        XPLMDebugString("[X1000] Failed to load GL FBO functions — capture disabled\n");
+        return false;
     }
+
+    // On X-Plane 12.4.4+, XPLMGetAvionicsHandle returns NULL until callbacks
+    // have been registered.  Always register callbacks first, then acquire handles.
+    if (!registerDrawCallbacks()) return false;
+    if (!acquireHandles())        return false;
 
     m_pfd_sock = makeUDPSocket(cfg.pfd_ip, cfg.pfd_push_port, m_pfd_addr);
     m_mfd_sock = makeUDPSocket(cfg.mfd_ip, cfg.mfd_push_port, m_mfd_addr);
 
-    if (m_pfd_sock < 0 || m_mfd_sock < 0) {
+    if (m_pfd_sock == INVALID_SOCK || m_mfd_sock == INVALID_SOCK) {
         XPLMDebugString("[X1000] Failed to create UDP sockets\n");
         return false;
     }
 
     startWorker();
+
+    // Register the scene-phase callback that does the actual glReadPixels.
+    // xplm_Phase_Window fires during the 2-D overlay phase — guaranteed to
+    // run on the render thread AFTER avionics FBOs have been rendered.
+    // Reading from our own blit FBO here is safe under all GL backends.
+    XPLMRegisterDrawCallback(scenePhaseCallback, xplm_Phase_Window,
+                             1 /*isBefore=before*/, nullptr);
+    m_scene_cb_registered = true;
+
+    // Reset deferred capture state from any previous streamer instance.
+    s_pfd_capture.pending.store(false, std::memory_order_relaxed);
+    s_mfd_capture.pending.store(false, std::memory_order_relaxed);
 
     char buf[128];
     snprintf(buf, sizeof(buf),
@@ -381,146 +526,151 @@ void DisplayStreamer::tick() {
 }
 
 // ---------------------------------------------------------------------------
-// Draw callbacks — called by X-Plane after rendering each G1000 panel
-// In this context, the GL framebuffer contains the panel at (0,0,w,h)
+// Avionics draw callbacks — only snapshot viewport, no GL readback.
+// (glReadPixels inside an avionics cb crashes Zink/Vulkan; see deferred
+//  capture comment above.)
 // ---------------------------------------------------------------------------
 
-// Helper: get screen dimensions from GeometryOS (works when popped out)
-static bool getScreenSize(XPLMAvionicsID handle, int& w, int& h) {
-    int left = 0, top = 0, right = 0, bottom = 0;
-    XPLMGetAvionicsGeometryOS(handle, &left, &top, &right, &bottom);
-    w = right - left;
-    h = bottom - top; // OS coords: bottom > top
-    if (w <= 0) w = -w; // normalise if inverted
-    if (h <= 0) h = -h;
-    w &= ~1; h &= ~1;   // even for JPEG
-    return (w > 0 && h > 0);
-}
-
 void DisplayStreamer::onDrawPFD() {
-    if (!m_ready || m_pfd_sock < 0) return;
-
-    double t = Platform::now_seconds();
-    if ((t - m_last_pfd_time) < (1.0 / m_cfg.fps)) return;
-    m_last_pfd_time = t;
-
-    int w = 0, h = 0;
-    if (!getScreenSize(m_pfd_handle, w, h)) return;
-    captureAndSend(w, h, m_pfd_sock, m_pfd_addr, "PFD");
+    // Viewport snapshot is already done by the static drawCallbackPFD above.
+    // Nothing else to do here; onScenePhase() handles the actual readback.
+    (void)this;
 }
 
 void DisplayStreamer::onDrawMFD() {
-    if (!m_ready || m_mfd_sock < 0) return;
-
-    double t = Platform::now_seconds();
-    if ((t - m_last_mfd_time) < (1.0 / m_cfg.fps)) return;
-    m_last_mfd_time = t;
-
-    int w = 0, h = 0;
-    if (!getScreenSize(m_mfd_handle, w, h)) return;
-    captureAndSend(w, h, m_mfd_sock, m_mfd_addr, "MFD");
+    (void)this;
 }
 
 // ---------------------------------------------------------------------------
-// PBO async readback
-// We use a double-buffer PBO scheme:
-//   Frame N:   glReadPixels into PBO[0] (async, non-blocking)
-//   Frame N+1: map PBO[1] (ready from previous frame), encode, send
-// This completely hides the GPU→CPU transfer latency.
+// onScenePhase — called during xplm_Phase_Window, after all avionics done.
+//
+// Fix 8: safe point for GL FBO allocation and glReadPixels.
+// The blit (avionics FBO → our FBO) already happened in blitPanelToFBO()
+// inside the avionics callback.  Here we just read from our own FBO.
 // ---------------------------------------------------------------------------
 
-struct PBOState {
-    GLuint pbo[2]  = {0, 0};
-    int    index   = 0;      // which PBO we write to this frame
-    int    rw      = 0;
-    int    rh      = 0;
-    bool   ready   = false;  // true once both PBOs have been filled once
-    int    fill_count = 0;
-};
+// ensureBlitFBO — allocates/resizes our blit-destination FBO+texture.
+// Called from onScenePhase() — safe for GL allocations (outside render pass).
+static void ensureBlitFBO(DeferredCapture& cap) {
+    GLint w = cap.rw, h = cap.rh;
+    if (w <= 0 || h <= 0) return;
 
-void DisplayStreamer::captureAndSend(int w, int h,
-                                     int sock, sockaddr_in& addr,
-                                     const char* name) {
-    // Load GL buffer functions on first call (PBO requires GL 1.5)
-    if (!Platform::loadGLBufferFunctions()) {
-        // Fallback: synchronous glReadPixels without PBO
-        GLint vp[4];
-        glGetIntegerv(GL_VIEWPORT, vp);
-        int rx=vp[0],ry=vp[1],rw=(vp[2]>0)?vp[2]:w,rh=(vp[3]>0)?vp[3]:h;
-        rw&=~1; rh&=~1;
-        const int TARGET_W=m_cfg.stream_width&~1;
-        const int TARGET_H=(rh*TARGET_W/rw)&~1;
-        std::vector<uint8_t> pixels(rw*rh*3);
-        glReadPixels(rx,ry,rw,rh,GL_RGB,GL_UNSIGNED_BYTE,pixels.data());
-        std::vector<uint8_t> scaled(TARGET_W*TARGET_H*3);
-        float sx=(float)rw/TARGET_W, sy=(float)rh/TARGET_H;
-        for(int dy=0;dy<TARGET_H;++dy){
-            int ssy=(int)((TARGET_H-1-dy)*sy); if(ssy>=rh)ssy=rh-1;
-            for(int dx=0;dx<TARGET_W;++dx){
-                int ssx=(int)(dx*sx); if(ssx>=rw)ssx=rw-1;
-                memcpy(&scaled[(dy*TARGET_W+dx)*3],&pixels[(ssy*rw+ssx)*3],3);
-            }
-        }
-        std::vector<uint8_t> jpeg; jpeg.reserve(TARGET_W*TARGET_H/4);
-        stbi_write_jpg_to_func(jpegWriteCB,&jpeg,TARGET_W,TARGET_H,3,scaled.data(),m_cfg.jpeg_quality);
-        if(!jpeg.empty()) pushFrame(jpeg.data(),jpeg.size(),sock,addr);
-        return;
-    }
+    // Check if already allocated at the right size
+    if (cap.fbo_ready.load(std::memory_order_acquire)) return;
 
-    // Get viewport
-    GLint vp[4];
-    glGetIntegerv(GL_VIEWPORT, vp);
+    // Allocate or reallocate
+    if (cap.fbo) { glDeleteFramebuffers_(1, &cap.fbo); cap.fbo = 0; }
+    if (cap.tex) { glDeleteTextures(1, &cap.tex);      cap.tex = 0; }
 
-    int rx = vp[0], ry = vp[1];
-    int rw = (vp[2] > 0) ? vp[2] : w;
-    int rh = (vp[3] > 0) ? vp[3] : h;
-    rw &= ~1; rh &= ~1;
+    glGenTextures(1, &cap.tex);
+    glBindTexture(GL_TEXTURE_2D, cap.tex);
+    // Use RGBA8 — some Mesa/Zink drivers silently reorder channels when reading
+    // back an RGB8 texture with GL_RGB. RGBA8 + GL_RGBA readback is always safe.
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glBindTexture(GL_TEXTURE_2D, 0);
 
-    // Per-display PBO state (static, one per name initial letter)
-    static PBOState pfd_pbo, mfd_pbo;
-    PBOState& pbo = (name[0] == 'P') ? pfd_pbo : mfd_pbo;
+    glGenFramebuffers_(1, &cap.fbo);
+    glBindFramebuffer_(GL_FRAMEBUFFER, cap.fbo);
+    glFramebufferTexture2D_(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                            GL_TEXTURE_2D, cap.tex, 0);
+    GLenum status = glCheckFramebufferStatus_(GL_FRAMEBUFFER);
+    glBindFramebuffer_(GL_FRAMEBUFFER, 0);
 
-    // (Re)allocate PBOs if size changed
-    if (pbo.pbo[0] == 0 || pbo.rw != rw || pbo.rh != rh) {
-        if (pbo.pbo[0]) glDeleteBuffers(2, pbo.pbo);
-        glGenBuffers(2, pbo.pbo);
-        size_t sz = rw * rh * 3;
-        for (int i = 0; i < 2; ++i) {
-            glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo.pbo[i]);
-            glBufferData(GL_PIXEL_PACK_BUFFER, sz, nullptr, GL_STREAM_READ);
-        }
-        glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-        pbo.rw = rw; pbo.rh = rh;
-        pbo.ready = false; pbo.fill_count = 0;
+    if (status == GL_FRAMEBUFFER_COMPLETE) {
+        cap.fbo_ready.store(true, std::memory_order_release);
         char buf[96];
         snprintf(buf, sizeof(buf),
-                 "[X1000] %s PBO allocated: %dx%d\n", name, rw, rh);
+                 "[X1000] BlitFBO allocated %dx%d fbo=%u tex=%u\n",
+                 w, h, cap.fbo, cap.tex);
         XPLMDebugString(buf);
+    } else {
+        XPLMDebugString("[X1000] BlitFBO: FBO incomplete — capture disabled\n");
+    }
+}
+
+void DisplayStreamer::onScenePhase() {
+    if (!m_ready) return;
+
+    // Allocate blit FBOs lazily once the panel dimensions are known.
+    // Dimensions are written by blitPanelToFBO() in the avionics callback.
+    if (s_pfd_capture.rw > 0 && !s_pfd_capture.fbo_ready.load(std::memory_order_relaxed))
+        ensureBlitFBO(s_pfd_capture);
+    if (s_mfd_capture.rw > 0 && !s_mfd_capture.fbo_ready.load(std::memory_order_relaxed))
+        ensureBlitFBO(s_mfd_capture);
+
+    double t = Platform::now_seconds();
+
+    // PFD — read from our blit FBO (not from X-Plane's active framebuffer)
+    if (m_pfd_sock != INVALID_SOCK &&
+        s_pfd_capture.pending.load(std::memory_order_acquire) &&
+        s_pfd_capture.fbo_ready.load(std::memory_order_acquire) &&
+        (t - m_last_pfd_time) >= (1.0 / m_cfg.fps)) {
+        s_pfd_capture.pending.store(false, std::memory_order_release);
+        m_last_pfd_time = t;
+        captureAndSend(0, 0, s_pfd_capture.rw, s_pfd_capture.rh,
+                       s_pfd_capture.fbo,
+                       m_pfd_sock, m_pfd_addr, "PFD");
     }
 
-    int write_idx = pbo.index;
-    int read_idx  = 1 - pbo.index;
+    // MFD
+    if (m_mfd_sock != INVALID_SOCK &&
+        s_mfd_capture.pending.load(std::memory_order_acquire) &&
+        s_mfd_capture.fbo_ready.load(std::memory_order_acquire) &&
+        (t - m_last_mfd_time) >= (1.0 / m_cfg.fps)) {
+        s_mfd_capture.pending.store(false, std::memory_order_release);
+        m_last_mfd_time = t;
+        captureAndSend(0, 0, s_mfd_capture.rw, s_mfd_capture.rh,
+                       s_mfd_capture.fbo,
+                       m_mfd_sock, m_mfd_addr, "MFD");
+    }
+}
 
-    // --- Step 1: kick off async readback into write PBO (returns immediately) ---
-    glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo.pbo[write_idx]);
-    glReadPixels(rx, ry, rw, rh, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
-    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-    pbo.fill_count++;
-    pbo.index = read_idx; // swap for next frame
+// ---------------------------------------------------------------------------
+// captureAndSend — glReadPixels from our own blit FBO
+//
+// Called from onScenePhase() — safe for GL state operations (outside any
+// active Vulkan render pass).  We bind our own FBO (populated by
+// blitPanelToFBO in the avionics callback) as READ, read pixels from (0,0),
+// then restore READ to 0.  No glGetIntegerv — restoration is hardcoded.
+// ---------------------------------------------------------------------------
 
-    // --- Step 2: map read PBO from previous frame (data is ready, no stall) ---
-    if (pbo.fill_count < 2) return; // need at least 2 frames to have valid read PBO
+void DisplayStreamer::captureAndSend(int rx, int ry, int rw, int rh,
+                                     GLuint fbo,
+                                     sock_t sock, sockaddr_in& addr,
+                                     const char* name) {
+    rw &= ~1; rh &= ~1;
+    if (rw <= 0 || rh <= 0 || !fbo) return;
 
-    glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo.pbo[read_idx]);
-    const uint8_t* pixels = (const uint8_t*)glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
-    if (!pixels) {
-        glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-        return;
+    // Log first capture dimensions once per display
+    static bool pfd_logged = false, mfd_logged = false;
+    bool& logged = (name[0] == 'P') ? pfd_logged : mfd_logged;
+
+    const int TARGET_W = m_cfg.stream_width & ~1;
+    const int TARGET_H = (rh * TARGET_W / rw) & ~1;
+    if (TARGET_W <= 0 || TARGET_H <= 0) return;
+
+    if (!logged) {
+        char buf[128];
+        snprintf(buf, sizeof(buf),
+                 "[X1000] %s first frame: %dx%d -> %dx%d (fbo=%u)\n",
+                 name, rw, rh, TARGET_W, TARGET_H, fbo);
+        XPLMDebugString(buf);
+        logged = true;
     }
 
-    // Read display brightness from dataref
-    // sim/cockpit2/electrical/display_screen_brightness
-    // Index 0 = PFD, index 2 = MFD (based on observed values)
+    // Bind our blit FBO as READ source and read pixels from (0,0).
+    // Our FBO is not part of any X-Plane render pass — safe under Zink.
+    // Restore READ to 0 hardcoded (no glGetIntegerv needed).
+    glBindFramebuffer_(GL_READ_FRAMEBUFFER, fbo);
+    // Read as RGBA — avoids channel-order issues with RGB8 textures under Mesa/Zink.
+    // Alpha channel is discarded in the scale loop below.
+    std::vector<uint8_t> raw(rw * rh * 4);
+    glReadPixels(rx, ry, rw, rh, GL_RGBA, GL_UNSIGNED_BYTE, raw.data());
+    glBindFramebuffer_(GL_READ_FRAMEBUFFER, 0);
+
+    // Read display brightness
     static XPLMDataRef s_brightness_dr = nullptr;
     if (!s_brightness_dr)
         s_brightness_dr = XPLMFindDataRef("sim/cockpit2/electrical/display_screen_brightness");
@@ -528,52 +678,38 @@ void DisplayStreamer::captureAndSend(int w, int h,
     if (s_brightness_dr) {
         float vals[8] = {1,1,1,1,1,1,1,1};
         XPLMGetDatavf(s_brightness_dr, vals, 0, 8);
-        // PFD=index 0, MFD=index 2
         brightness = (name[0] == 'P') ? vals[0] : vals[2];
-        if (brightness < 0.1f) brightness = 0.1f;  // never go fully black
+        if (brightness < 0.1f) brightness = 0.1f;
         if (brightness > 1.0f) brightness = 1.0f;
     }
 
-    // Scale and flip, applying brightness
-    const int TARGET_W = m_cfg.stream_width & ~1;
-    const int TARGET_H = (rh * TARGET_W / rw) & ~1;
+    // Scale down + vertical flip (GL origin is bottom-left; display expects top-left)
+    // + apply brightness — all in one pass into the worker job buffer.
+    // Scale + vertical flip + brightness, RGBA src → RGB dst (drop alpha).
     std::vector<uint8_t> scaled(TARGET_W * TARGET_H * 3);
     float scaleX = (float)rw / TARGET_W;
     float scaleY = (float)rh / TARGET_H;
     for (int dy = 0; dy < TARGET_H; ++dy) {
         int sy = (int)((TARGET_H - 1 - dy) * scaleY);
         if (sy >= rh) sy = rh - 1;
+        const uint8_t* src_row = &raw[sy * rw * 4];   // stride 4 (RGBA)
+        uint8_t*       dst_row = &scaled[dy * TARGET_W * 3];
         for (int dx = 0; dx < TARGET_W; ++dx) {
             int sx = (int)(dx * scaleX);
             if (sx >= rw) sx = rw - 1;
-            const uint8_t* src = &pixels[(sy * rw + sx) * 3];
-            uint8_t* dst = &scaled[(dy * TARGET_W + dx) * 3];
-            dst[0] = (uint8_t)(src[0] * brightness);
-            dst[1] = (uint8_t)(src[1] * brightness);
-            dst[2] = (uint8_t)(src[2] * brightness);
+            const uint8_t* src = src_row + sx * 4;    // RGBA pixel
+            uint8_t*       dst = dst_row + dx * 3;    // RGB pixel
+            dst[0] = (uint8_t)(src[0] * brightness);  // R
+            dst[1] = (uint8_t)(src[1] * brightness);  // G
+            dst[2] = (uint8_t)(src[2] * brightness);  // B  (src[3] = A, discarded)
         }
     }
 
-    glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
-    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-
-    // Log first frame dimensions
-    static bool pfd_logged = false, mfd_logged = false;
-    bool& logged = (name[0] == 'P') ? pfd_logged : mfd_logged;
-    if (!logged) {
-        char buf[128];
-        snprintf(buf, sizeof(buf),
-                 "[X1000] %s first frame: %dx%d -> %dx%d\n",
-                 name, rw, rh, TARGET_W, TARGET_H);
-        XPLMDebugString(buf);
-        logged = true;
-    }
-
-    // Hand off to background worker — render thread is now free
-    // Drop frame if queue is backing up (keep latency low)
+    // Hand off to background worker for JPEG encode + UDP send.
+    // Drop frame if queue is backing up (keep latency low).
     {
         std::unique_lock<std::mutex> lock(s_queue_mutex);
-        if (s_encode_queue.size() < 2) {  // max 2 frames queued
+        if (s_encode_queue.size() < 2) {
             EncodeJob job;
             job.pixels  = std::move(scaled);
             job.w       = TARGET_W;
@@ -584,7 +720,7 @@ void DisplayStreamer::captureAndSend(int w, int h,
             s_encode_queue.push(std::move(job));
             s_queue_cv.notify_one();
         }
-        // else: drop this frame — sim is more important than streaming
+        // else: drop this frame — sim responsiveness takes priority
     }
 }
 
@@ -593,7 +729,7 @@ void DisplayStreamer::captureAndSend(int w, int h,
 // ---------------------------------------------------------------------------
 
 void DisplayStreamer::pushFrame(const uint8_t* data, size_t len,
-                                int sock, sockaddr_in& addr) {
+                                sock_t sock, sockaddr_in& addr) {
     uint32_t seq   = m_frame_seq++;
     uint32_t total = (uint32_t)((len + CHUNK_DATA - 1) / CHUNK_DATA);
 
@@ -639,6 +775,13 @@ bool DisplayStreamer::popOutAndGetGeometry(XPLMAvionicsID, const char*,
 // ---------------------------------------------------------------------------
 
 void DisplayStreamer::shutdown() {
+    m_ready = false;   // stop onScenePhase() from doing work first
+
+    if (m_scene_cb_registered) {
+        XPLMUnregisterDrawCallback(scenePhaseCallback, xplm_Phase_Window,
+                                   1 /*isBefore=before*/, nullptr);
+        m_scene_cb_registered = false;
+    }
     if (m_pfd_cb_handle) {
         XPLMUnregisterAvionicsCallbacks(m_pfd_cb_handle);
         m_pfd_cb_handle = nullptr;
@@ -648,16 +791,25 @@ void DisplayStreamer::shutdown() {
         m_mfd_cb_handle = nullptr;
     }
     stopWorker();
-    // PBO cleanup handled implicitly by GL context cleanup on plugin unload
-#if defined(_WIN32)
-    if (m_pfd_sock >= 0) { closesocket(m_pfd_sock); m_pfd_sock = -1; }
-    if (m_mfd_sock >= 0) { closesocket(m_mfd_sock); m_mfd_sock = -1; }
-#else
-    if (m_pfd_sock >= 0) { ::close(m_pfd_sock); m_pfd_sock = -1; }
-    if (m_mfd_sock >= 0) { ::close(m_mfd_sock); m_mfd_sock = -1; }
-#endif
+
+    // Reset pending flags before freeing GL resources.
+    s_pfd_capture.pending.store(false, std::memory_order_relaxed);
+    s_mfd_capture.pending.store(false, std::memory_order_relaxed);
+
+    // Free blit FBOs (called on render thread — GL context is current).
+    auto freeFBO = [](DeferredCapture& cap) {
+        cap.fbo_ready.store(false, std::memory_order_relaxed);
+        if (cap.fbo) { glDeleteFramebuffers_(1, &cap.fbo); cap.fbo = 0; }
+        if (cap.tex) { glDeleteTextures(1, &cap.tex);      cap.tex = 0; }
+        cap.rw = cap.rh = 0;
+    };
+    freeFBO(s_pfd_capture);
+    freeFBO(s_mfd_capture);
+
+    // close() is #define'd to closesocket() on Windows; works on both platforms.
+    if (m_pfd_sock != INVALID_SOCK) { close(m_pfd_sock); m_pfd_sock = INVALID_SOCK; }
+    if (m_mfd_sock != INVALID_SOCK) { close(m_mfd_sock); m_mfd_sock = INVALID_SOCK; }
     m_pfd_handle = nullptr;
     m_mfd_handle = nullptr;
-    m_ready = false;
     XPLMDebugString("[X1000] DisplayStreamer: shutdown.\n");
 }
