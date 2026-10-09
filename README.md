@@ -13,9 +13,10 @@ Designed for use with **Simionic SHB1000S** bezels and two iPads as screens, pro
 ## Features
 
 ### Display
-- **Live G1000 PFD/MFD mirroring** — captured via OpenGL draw callbacks, JPEG-encoded and streamed to Safari on iPads at ~15fps with ~30–50ms latency
+- **Live G1000 PFD/MFD mirroring** — captured via Zink-safe FBO blit + deferred readback, JPEG-encoded and streamed to Safari on iPads at ~15fps with ~30–50ms latency
+- **Zink compatible** — works with X-Plane 12's OpenGL→Vulkan bridge (Zink) on Windows and Linux; no crashes, no color artifacts
 - **Brightness sync** — iPad image brightness tracks `sim/cockpit2/electrical/display_screen_brightness` in real time
-- **Minimal FPS impact** — async GPU readback (PBO) + background encode thread; ~4fps hit at LFPG
+- **Minimal FPS impact** — GPU→GPU blit + background encode thread; ~4fps hit at LFPG
 - **Smart init** — plugin detects whether the loaded aircraft has G1000 avionics and whether the screens are popped out; no performance impact when flying non-G1000 aircraft
 
 ### Bezel Input (SHB1000S via Bluetooth LE)
@@ -47,8 +48,10 @@ Designed for use with **Simionic SHB1000S** bezels and two iPads as screens, pro
 ## Architecture
 
 ```
-X-Plane G1000 draw callback
-  → glReadPixels (PBO async)
+X-Plane G1000 avionics callback (after draw)
+  → glBlitFramebuffer (GPU→GPU, into our own FBO)   ← Zink-safe, no readback here
+X-Plane Window phase draw callback
+  → glReadPixels from our FBO (outside Vulkan render pass, always safe)
   → JPEG encode × brightness (worker thread)
   → UDP :9000/:9001
   → tools/x1000_relay.py (WebSocket server)   ← auto-launched by plugin
@@ -81,7 +84,9 @@ Bytes 1..N: pre-computed BLE bytes — ON byte or OFF byte for each tracked LED
 **Key design decisions:**
 - Bezel input/output handled by a separate Python process (`x1000_bezel.py`) for crash isolation
 - Display relay uses Python stdlib only — no pip dependencies
-- PBO double-buffering eliminates GPU readback stall
+- FBO blit (GPU→GPU) in avionics callback avoids Vulkan render pass interference under Zink
+- `glReadPixels` deferred to Window phase where it is always safe (outside Vulkan render pass)
+- RGBA8 texture + GL_RGBA readback avoids channel-order issues with Mesa/Zink drivers
 - JPEG encode happens on a background thread — render thread cost is negligible
 - Single ini file at plugin root shared by all platform binaries
 - Plugin detects non-G1000 aircraft instantly (no blocking loop) and stops retrying
@@ -137,8 +142,8 @@ X1000_display/
 | In-sim settings UI | ✅ Working |
 | Persistent settings (shared ini) | ✅ Working |
 | Bezel scan with auto PFD detection | ✅ Working |
-| Linux build | ✅ Working |
-| Windows 10 build and runtime | ✅ Working |
+| Linux build (OpenGL + Zink) | ✅ Working |
+| Windows 10/11 build and runtime (OpenGL + Zink) | ✅ Working |
 | macOS build | ⏳ Script ready, needs a Mac |
 | PFD bezel input — all buttons/knobs | ✅ Working |
 | MFD bezel input — all buttons/knobs | ✅ Working |
@@ -176,8 +181,8 @@ X1000_display/
 
 ## Requirements
 
-- X-Plane 12 (SDK 4.1+)
-- X-Plane SDK — download from [developer.x-plane.com](https://developer.x-plane.com), place at `SDK/`
+- X-Plane 12 (SDK 4.4.0+)
+- X-Plane SDK 4.4.0+ — download from [developer.x-plane.com](https://developer.x-plane.com), place at `SDK/`
 - Python 3.8+
   - Display relay: no pip installs needed (stdlib only)
   - Bezel bridge: `pip install bleak --break-system-packages`
@@ -276,6 +281,12 @@ tools/x1000_bezel.py              →  <XP12>/Resources/plugins/X1000_display/to
 - Click **[Scan BLE]**, press 3 buttons on the PFD bezel when prompted
 - Both bezels auto-assigned — plugin connects immediately
 
+**Windows Firewall / Avast:**
+The relay uses TCP ports 8080 and 8081. Windows Defender rules are usually created automatically, but if your antivirus (e.g. Avast) manages its own firewall, you may need to mark your local network as "trusted" or add an inbound rule for `python.exe` on ports 8080–8081. To add a Windows Defender rule manually (PowerShell as admin):
+```powershell
+New-NetFirewallRule -DisplayName "X1000 Stream 8080-8081" -Direction Inbound -Protocol TCP -LocalPort 8080,8081 -Action Allow -Profile Any
+```
+
 ---
 
 ### macOS (must run on a Mac)
@@ -368,9 +379,11 @@ pip install bleak --break-system-packages
 
 ### Running alongside the Simionic plugin
 
-Running X1000_display and the Simionic plugin simultaneously is not supported — both plugins use UDP ports 15683/15685 for bezel input, causing a bind conflict. The Bluetooth adapter is also shared and may conflict.
+Compatibility with the Simionic plugin is not yet fully tested. Known potential conflicts:
+- Both plugins may use UDP ports 15683/15685 for bezel input, causing a bind conflict
+- The Bluetooth adapter is shared and may conflict
 
-If you need to run both plugins, change the bezel ports in `X1000_display.ini`:
+If you experience issues, change the bezel ports in `X1000_display.ini`:
 
 ```ini
 [bezel]
