@@ -406,6 +406,20 @@ async def main(args):
 
     log.info(f"{len(connected)} bezel(s) connected. Press Ctrl+C to stop.")
 
+    # Reconnect task — runs in background so it never blocks the LED loop
+    reconnect_in_progress = set()  # client names currently reconnecting
+
+    async def reconnect_worker(client):
+        reconnect_in_progress.add(client.name)
+        log.warning(f"{client.name}: disconnected — reconnecting in 5s...")
+        await asyncio.sleep(5.0)
+        try:
+            await client.connect()
+            log.info(f"{client.name}: reconnected successfully")
+        except Exception as e:
+            log.error(f"{client.name}: reconnect failed: {e}")
+        reconnect_in_progress.discard(client.name)
+
     # Main loop — keep alive + push LED state
     loop_count = 0
     try:
@@ -416,31 +430,26 @@ async def main(args):
             # Poll LED state from plugin
             changed = led_rx.poll()
 
-            # Log status every 5s (25 iterations)
+            # Log status every 5s (75 iterations at 15Hz)
             if loop_count % 75 == 1:
-                c0 = clients[0].is_connected if clients else False
-                c1 = clients[1].is_connected if len(clients) > 1 else False
-                log.info(f"loop#{loop_count} PFD_conn={c0} MFD_conn={c1} "
-                         f"bright={led_rx.brightness} leds={led_rx.leds} changed={changed}")
+                statuses = " ".join(
+                    f"{c.name}={'OK' if c.is_connected else 'OFF'}"
+                    for c in clients)
+                log.info(f"loop#{loop_count} {statuses} "
+                         f"bright={led_rx.brightness} leds={led_rx.leds}")
 
-            # Push brightness to MFD first (no LED bytes — fast)
-            if len(clients) > 1 and clients[1].is_connected:
-                await clients[1].update_leds(led_rx.brightness, [])
-
-            # Push LED state to PFD bezel (has audio panel + LED bytes)
-            if clients and clients[0].is_connected:
-                await clients[0].update_leds(led_rx.brightness, led_rx.leds)
-
-            # Reconnect if disconnected
+            # Push LED state to each connected bezel.
+            # PFD (audio panel attached) gets full LED bytes.
+            # MFD gets brightness only (no LED bytes).
             for client in clients:
-                if not client.is_connected:
-                    log.warning(f"{client.name}: disconnected — reconnecting in 3s...")
-                    await asyncio.sleep(3.0)
-                    try:
-                        await client.connect()
-                        log.info(f"{client.name}: reconnected successfully")
-                    except Exception as e:
-                        log.error(f"{client.name}: reconnect failed: {e}")
+                if client.is_connected:
+                    leds = led_rx.leds if client.name == "PFD" else []
+                    await client.update_leds(led_rx.brightness, leds)
+
+            # Reconnect if disconnected — in background so LED loop is never blocked
+            for client in clients:
+                if not client.is_connected and client.name not in reconnect_in_progress:
+                    asyncio.ensure_future(reconnect_worker(client))
 
     except asyncio.CancelledError:
         pass
