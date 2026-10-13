@@ -52,6 +52,14 @@ static void applySettings() {
         g_relay->restart(s.relay_pfd_port, s.relay_mfd_port);
     }
 
+    // Reinitialise ConnectionManager if bezel ports changed
+    if (g_conn) {
+        g_conn->shutdown();
+        if (!g_conn->init(s.bezel_pfd_port, s.bezel_mfd_port)) {
+            XPLMDebugString("[X1000] ConnectionManager re-init failed\n");
+        }
+    }
+
     // Restart bezel relay with potentially new MAC addresses
     if (g_bezel_relay) {
         g_bezel_relay->stop();
@@ -59,6 +67,8 @@ static void applySettings() {
         if (!s.pfd_bezel_mac.empty()) bezel_args += "--pfd " + s.pfd_bezel_mac + " ";
         if (!s.mfd_bezel_mac.empty()) bezel_args += "--mfd " + s.mfd_bezel_mac + " ";
         bezel_args += "--plugin-ip 127.0.0.1";
+        bezel_args += " --pfd-port " + std::to_string(s.bezel_pfd_port);
+        bezel_args += " --mfd-port " + std::to_string(s.bezel_mfd_port);
         g_bezel_relay->restart_with_args(bezel_args);
     }
 
@@ -250,7 +260,7 @@ PLUGIN_API int XPluginEnable() {
 
     // Bezel UDP input / backlight output
     g_conn = new ConnectionManager();
-    if (!g_conn->init()) {
+    if (!g_conn->init(g_settings->get().bezel_pfd_port, g_settings->get().bezel_mfd_port)) {
         XPLMDebugString("[X1000] ConnectionManager init failed\n");
         delete g_conn; g_conn = nullptr;
     }
@@ -275,6 +285,8 @@ PLUGIN_API int XPluginEnable() {
         if (!bs.pfd_bezel_mac.empty()) bezel_args += "--pfd " + bs.pfd_bezel_mac + " ";
         if (!bs.mfd_bezel_mac.empty()) bezel_args += "--mfd " + bs.mfd_bezel_mac + " ";
         bezel_args += "--plugin-ip 127.0.0.1";
+        bezel_args += " --pfd-port " + std::to_string(bs.bezel_pfd_port);
+        bezel_args += " --mfd-port " + std::to_string(bs.bezel_mfd_port);
 
         g_bezel_relay->init(bezel_path,
                             bs.bezel_pfd_port,

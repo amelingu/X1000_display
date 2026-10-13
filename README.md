@@ -59,7 +59,7 @@ X-Plane Window phase draw callback
 
 tools/x1000_bezel.py (bleak BLE, standalone process)   ← auto-launched by plugin
   → connects to SHB1000S bezel(s) via Bluetooth LE
-  INPUT:  BLE notifications → UKP bytes → UDP :15683 (PFD) / :15685 (MFD)
+  INPUT:  BLE notifications → UKP bytes → UDP :15693 (PFD) / :15695 (MFD)  [configurable in ini]
           → ConnectionManager → UKPHandler → XPLMCommandBegin/Continue/End
           → AudioPanelManager → XPLMCommandOnce / XPLMSetDatai
   OUTPUT: UDP :15684 ← plugin binary LED state packet
@@ -145,6 +145,8 @@ X1000_display/
 | Linux build (OpenGL + Zink) | ✅ Working |
 | Windows 10/11 build and runtime (OpenGL + Zink) | ✅ Working |
 | macOS build | ⏳ Script ready, needs a Mac |
+| Simionic plugin coexistence (display stream only) | ✅ Working |
+| Simionic plugin coexistence (bezel input) | ❌ Not supported (BLE + port conflict) |
 | PFD bezel input — all buttons/knobs | ✅ Working |
 | MFD bezel input — all buttons/knobs | ✅ Working |
 | Audio panel — COM/NAV/ADF/DME/MKR | ✅ Working |
@@ -368,8 +370,8 @@ Edit `X1000_display.ini` at the plugin root:
 [bezel]
 pfd_bezel_mac=00:07:80:A6:E1:71
 mfd_bezel_mac=00:07:80:A6:F5:0A
-bezel_pfd_port=15683
-bezel_mfd_port=15685
+bezel_pfd_port=15693
+bezel_mfd_port=15695
 ```
 
 Install bleak once:
@@ -379,11 +381,18 @@ pip install bleak --break-system-packages
 
 ### Running alongside the Simionic plugin
 
-Compatibility with the Simionic plugin is not yet fully tested. Known potential conflicts:
-- Both plugins may use UDP ports 15683/15685 for bezel input, causing a bind conflict
-- The Bluetooth adapter is shared and may conflict
+X1000_display and the Simionic plugin can coexist in the same X-Plane session, with the following caveats tested on Windows 10:
 
-If you experience issues, change the bezel ports in `X1000_display.ini`:
+**What works:**
+- Display stream (PFD + MFD) functions correctly alongside Simionic
+- Switching from X1000_display to Simionic mid-session works without restarting X-Plane
+
+**Known limitations:**
+- **Switching back** from Simionic to X1000_display mid-session is not supported — restart X-Plane
+- **Bezel buttons/LEDs are not available** when the Simionic plugin is active: Simionic monopolises the Bluetooth adapter (bleak reports "No Bluetooth adapter found") and UDP port 15683/15685, so x1000_bezel.py cannot connect
+- **Minor LED glitches** may occur while Simionic is active — disable Simionic from the X-Plane Plugin Manager (Plugins → Plugin Manager → uncheck Simionic) even mid-session to clear them immediately; buttons and LEDs then work normally without restarting X-Plane
+
+**Required: change the default bezel UDP ports** to avoid a crash (CTD) caused by both plugins trying to bind the same ports. Edit `X1000_display.ini` (or create it before first launch):
 
 ```ini
 [bezel]
@@ -391,7 +400,7 @@ bezel_pfd_port=15693
 bezel_mfd_port=15695
 ```
 
-Note: the Simionic plugin must be disabled or unloaded before starting X1000_display for BLE to work correctly.
+These are now the **default values** when no ini file exists, so you only need this if you previously had an ini with the old defaults (15683/15685).
 
 ---
 

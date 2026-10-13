@@ -31,8 +31,8 @@ struct Settings {
     std::string mfd_bezel_mac = "";  // e.g. "00:07:80:A6:F5:0A"
 
     // Bezel UDP ports
-    uint16_t bezel_pfd_port = 15683;
-    uint16_t bezel_mfd_port = 15685;
+    uint16_t bezel_pfd_port = 15693;
+    uint16_t bezel_mfd_port = 15695;
 };
 
 class SettingsManager {

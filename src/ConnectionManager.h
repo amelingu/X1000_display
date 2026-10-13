@@ -2,7 +2,7 @@
 // ConnectionManager.h — UDP connection lifecycle with both iPads.
 //
 // Owns:
-//   - Receive socket (:15683) — UKP events + handshake from both iPads
+//   - Receive sockets (ports from ini, default :15693/:15695) — UKP events + handshake from both iPads
 //   - Send socket           — ClientAv messages to both iPads (:15684)
 //     (shared with BacklightManager so it can push BL updates)
 //
@@ -32,7 +32,7 @@ class ConnectionManager {
 public:
     ConnectionManager();
 
-    bool init();
+    bool init(uint16_t pfd_port = 15683, uint16_t mfd_port = 15685);
     void poll();           // drain receive buffer — call every frame
     void tickUKP();         // fires held-button repeats
     BezelSide lastUKPSide() const { return m_last_ukp_side; }
@@ -53,8 +53,8 @@ private:
     static int parseUKP(const std::string& msg);
     void       sendHandshake(const std::string& msg, const iPadEndpoint& ep);
 
-    UDPSocket      m_pfd_recv_sock;  // bound to :15683 — PFD bezel UKP
-    UDPSocket      m_mfd_recv_sock;  // bound to :15685 — MFD bezel UKP
+    UDPSocket      m_pfd_recv_sock;  // bound to m_pfd_recv_port — PFD bezel UKP
+    UDPSocket      m_mfd_recv_sock;  // bound to m_mfd_recv_port — MFD bezel UKP
     std::string    m_last_ukp_ip;    // IP of last UKP sender (for scan activity)
     UDPSocket      m_send_sock;      // unbound, used for all outbound messages
     UKPHandler     m_ukp;
@@ -64,7 +64,7 @@ private:
     iPadEndpoint m_pfd_ep;
     iPadEndpoint m_mfd_ep;
 
-    static constexpr uint16_t PFD_RECV_PORT = 15683;
-    static constexpr uint16_t MFD_RECV_PORT = 15685;
-    static constexpr uint16_t SEND_PORT      = 15684;
+    uint16_t m_pfd_recv_port = 15683;
+    uint16_t m_mfd_recv_port = 15685;
+    static constexpr uint16_t SEND_PORT = 15684;
 };

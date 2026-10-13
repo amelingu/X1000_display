@@ -23,13 +23,22 @@ ConnectionManager::ConnectionManager() {
     m_mfd_ep = { "192.168.1.21", BezelSide::MFD };
 }
 
-bool ConnectionManager::init() {
-    if (!m_pfd_recv_sock.bind(PFD_RECV_PORT)) {
-        XPLMDebugString("[X1000] ConnectionManager: failed to bind UDP :15683 (PFD)\n");
+bool ConnectionManager::init(uint16_t pfd_port, uint16_t mfd_port) {
+    m_pfd_recv_port = pfd_port;
+    m_mfd_recv_port = mfd_port;
+
+    if (!m_pfd_recv_sock.bind(m_pfd_recv_port)) {
+        char buf[80];
+        snprintf(buf, sizeof(buf),
+                 "[X1000] ConnectionManager: failed to bind UDP :%u (PFD)\n", m_pfd_recv_port);
+        XPLMDebugString(buf);
         return false;
     }
-    if (!m_mfd_recv_sock.bind(MFD_RECV_PORT)) {
-        XPLMDebugString("[X1000] ConnectionManager: failed to bind UDP :15685 (MFD)\n");
+    if (!m_mfd_recv_sock.bind(m_mfd_recv_port)) {
+        char buf[80];
+        snprintf(buf, sizeof(buf),
+                 "[X1000] ConnectionManager: failed to bind UDP :%u (MFD)\n", m_mfd_recv_port);
+        XPLMDebugString(buf);
         return false;
     }
     // Send socket: bind to any port (OS picks one)
@@ -42,7 +51,11 @@ bool ConnectionManager::init() {
     m_ukp.init();
     m_backlight.init();
 
-    XPLMDebugString("[X1000] ConnectionManager: ready on UDP :15683 (PFD) :15685 (MFD)\n");
+    char buf[80];
+    snprintf(buf, sizeof(buf),
+             "[X1000] ConnectionManager: ready on UDP :%u (PFD) :%u (MFD)\n",
+             m_pfd_recv_port, m_mfd_recv_port);
+    XPLMDebugString(buf);
 
     // Announce to both iPads
     sendHandshake("ClientComingX", m_pfd_ep);
